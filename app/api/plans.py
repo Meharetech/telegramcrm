@@ -182,7 +182,16 @@ async def assign_plan_to_user(user_id: str, req: AssignPlan, current_user: User 
     return {"message": "Plan assigned", "plan_id": user.plan_id}
 
 
-# ── Public: list active plans + my plan ──────────────────────────────────────
+# ── Public (NO AUTH): for landing page ───────────────────────────────────────
+
+@router.get("/public")
+async def list_public_plans_no_auth():
+    """Active plans visible to unauthenticated users (landing page pricing)."""
+    plans = await Plan.find(Plan.is_active == True).sort("+price_inr").to_list()
+    return [plan_to_dict(p) for p in plans]
+
+
+# ── Authenticated: list active plans + my plan ──────────────────────────────
 
 @router.get("/")
 async def list_public_plans(current_user: User = Depends(get_current_user)):
