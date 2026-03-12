@@ -1,0 +1,5 @@
+Traceback (most recent call last):
+  File "C:\Users\Rahul\Desktop\telegramcrm\backend\main.py", line 97, in lifespan
+    MemberAddSettings, MemberAddJob, MessageCampaignJob
+                                     ^^^^^^^^^^^^^^^^^^
+NameError: name 'MessageCampaignJob' is not defined
