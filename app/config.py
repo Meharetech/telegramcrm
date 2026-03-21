@@ -7,6 +7,7 @@ class Settings(BaseSettings):
     HOST: str = "127.0.0.1"
     PORT: int = 8000
     DEBUG: bool = True
+    ALLOWED_ORIGINS: str = "https://telegramcrmai.com,http://localhost:5173"
 
     # Database
     MONGODB_URL: str = "mongodb://localhost:27017/telegram"
