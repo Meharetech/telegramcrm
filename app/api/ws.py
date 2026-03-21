@@ -141,19 +141,19 @@ async def attach_ws_handlers(client, account_id: str):
 
 @router.websocket("/ws/{account_id}")
 async def websocket_endpoint(websocket: WebSocket, account_id: str, token: str = None):
-    # FIX: Validate token BEFORE accepting/registering the WebSocket.
+    # FIRST: Accept the connection immediately to satisfy the browser handshake
+    await websocket.accept()
+    
     from app.api.auth_utils import get_user_from_token
     from bson import ObjectId
 
     if not token:
-        await websocket.accept()
         await websocket.send_json({"type": "error", "message": "Missing authentication token"})
         await websocket.close(code=1008)
         return
 
     user = await get_user_from_token(token)
     if not user:
-        await websocket.accept()
         await websocket.send_json({"type": "error", "message": "Invalid token"})
         await websocket.close(code=1008)
         return
@@ -169,13 +169,16 @@ async def websocket_endpoint(websocket: WebSocket, account_id: str, token: str =
         pass
 
     if not account or not account.session_string:
-        await websocket.accept()
         await websocket.send_json({"type": "error", "message": "Unauthorized account access"})
         await websocket.close(code=1008)
         return
 
-    # ── Auth passed — now accept and register ─────────────────────────────
-    await manager.connect(websocket, account_id)
+    # ── Auth passed — now register in manager ─────────────────────────────
+    # Note: connect no longer calls accept() because we did it above
+    if account_id not in manager.active_connections:
+        manager.active_connections[account_id] = []
+    manager.active_connections[account_id].append(websocket)
+    
     try:
         # Ensure client is connected and handlers are attached
         try:
@@ -208,17 +211,22 @@ async def websocket_endpoint(websocket: WebSocket, account_id: str, token: str =
 @router.websocket("/ws/notifications/{token}")
 async def global_notification_endpoint(websocket: WebSocket, token: str):
     """Real-time global notifications (reminders, system alerts, etc) for a user."""
+    # FIRST: Accept connection immediately
+    await websocket.accept()
+    
     from app.api.auth_utils import get_user_from_token
     
     user = await get_user_from_token(token)
     if not user:
-        await websocket.accept()
         await websocket.send_json({"type": "error", "message": "Invalid token"})
         await websocket.close(code=1008)
         return
 
     user_id = str(user.id)
-    await manager.connect_user(websocket, user_id)
+    # Note: connect_user no longer calls accept() because we did it above
+    if user_id not in manager.user_notifications:
+        manager.user_notifications[user_id] = []
+    manager.user_notifications[user_id].append(websocket)
     
     logger.info(f"[ws] User {user_id} connected to global notifications")
     
