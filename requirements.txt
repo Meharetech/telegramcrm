@@ -1,5 +1,6 @@
 fastapi
 uvicorn
+gunicorn
 motor
 beanie
 telethon
@@ -9,3 +10,14 @@ python-dotenv
 pydantic>=2.0.0
 pydantic-settings
 python-multipart
+pymongo
+pysocks
+python-jose[cryptography]
+passlib[bcrypt]
+slowapi
+sse-starlette
+email-validator
+razorpay
+dnspython
+cryptography
+bcrypt

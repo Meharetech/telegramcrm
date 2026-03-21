@@ -12,3 +12,4 @@ from .mission_settings import MemberAddSettings
 from .member_add_job import MemberAddJob
 from .message_campaign import MessageCampaignJob
 from .payment import Payment
+from .system_settings import SystemSettings

@@ -7,9 +7,10 @@ from bson import ObjectId
 
 class User(Document):
     email: str
+    phone: Optional[str] = None
     hashed_password: str
     full_name: Optional[str] = None
-    is_active: bool = True
+    is_active: bool = False
     is_admin: bool = False
     is_admin_active: bool = False
     is_super_admin: bool = False # New field for protected admin
@@ -22,10 +23,15 @@ class User(Document):
     last_start_at: Optional[datetime] = None
     last_stop_at: Optional[datetime] = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    reset_code: Optional[str] = None
+    reset_code_expiry: Optional[datetime] = None
+    reg_otp: Optional[str] = None
+    reg_otp_expiry: Optional[datetime] = None
 
     class UserShort(BaseModel):
         id: Optional[ObjectId] = Field(None, alias="_id")
         email: str
+        phone: Optional[str] = None
         full_name: Optional[str]
         is_active: bool
         is_admin: bool

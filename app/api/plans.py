@@ -2,24 +2,56 @@
 Plan Management API — with Razorpay Payment Integration
 Routes are mounted at /api/plans (see main.py)
 """
-import hmac, hashlib
+import hmac, hashlib, os, shutil
 import razorpay
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, Form
 from pydantic import BaseModel
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 from bson import ObjectId
 
-from app.models import User, Plan, Payment
+from app.models import User, Plan, Payment, SystemSettings
 from app.api.auth_utils import get_current_user
 from app.config import settings
 
 router = APIRouter()
 
+@router.post("/upload-gateway-image")
+async def upload_gateway_image(file: UploadFile = File(...), current_user: User = Depends(get_current_user)):
+    """Upload a QR code or image for a payment gateway (Admin Only)."""
+    if not current_user.is_admin:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    
+    # 1. Validate File Type
+    allowed = ['.jpg', '.jpeg', '.png', '.webp']
+    ext = os.path.splitext(file.filename)[1].lower()
+    if ext not in allowed:
+        raise HTTPException(status_code=400, detail="Invalid file type. Only JPG, PNG, and WEBP images are allowed.")
+    
+    # 2. Basic Filename Sanitation
+    os.makedirs("uploads/gateways", exist_ok=True)
+    safe_name = f"gt_{int(datetime.now().timestamp())}{ext}"
+    file_path = f"uploads/gateways/{safe_name}"
+    
+    with open(file_path, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+        
+    return {"url": f"uploads/gateways/{safe_name}"}
+
 # ── Razorpay client (lazy init) ───────────────────────────────────────────────
-def get_razorpay():
+def get_razorpay(key_id: str = None, key_secret: str = None):
+    # Prefer passed credentials, fallback to env settings. Treatment of empty strings as None.
+    kid = key_id if key_id else getattr(settings, 'RAZORPAY_KEY_ID', None)
+    ksec = key_secret if key_secret else getattr(settings, 'RAZORPAY_KEY_SECRET', None)
+    
+    if not kid or not ksec:
+        raise HTTPException(
+            status_code=500, 
+            detail="Razorpay authentication keys are missing. Please configure them in the Admin Panel or .env file."
+        )
+        
     return razorpay.Client(
-        auth=(settings.RAZORPAY_KEY_ID, settings.RAZORPAY_KEY_SECRET)
+        auth=(kid, ksec)
     )
 
 
@@ -80,6 +112,43 @@ class VerifyPaymentReq(BaseModel):
     billing_cycle: str = "monthly"
 
 
+class ManualGatewaySchema(BaseModel):
+    name: str
+    qr_code_url: Optional[str] = None
+    upi_id: Optional[str] = None
+    instructions: Optional[str] = None
+    is_active: bool = True
+
+class CryptoGatewaySchema(BaseModel):
+    name: str
+    symbol: str
+    network: str
+    wallet_address: str
+    qr_code_url: Optional[str] = None
+    is_active: bool = True
+
+class SystemSettingsSchema(BaseModel):
+    razorpay_enabled: bool = True
+    manual_payment_enabled: bool = True
+    crypto_payment_enabled: bool = True
+    razorpay_key_id: Optional[str] = None
+    razorpay_key_secret: Optional[str] = None
+    manual_gateways: list[ManualGatewaySchema] = []
+    crypto_gateways: list[CryptoGatewaySchema] = []
+
+class InitiateManualPaymentReq(BaseModel):
+    plan_id: str
+    billing_cycle: str = "monthly"
+    gateway: str # "manual" or "crypto"
+    sub_gateway: str # e.g. "PhonePe" or "USDT"
+    transaction_ref: str
+    proof_image_url: Optional[str] = None
+
+class AdminVerifyPaymentReq(BaseModel):
+    status: str # "success" or "rejected"
+    admin_note: Optional[str] = None
+
+
 # ── Helper ────────────────────────────────────────────────────────────────────
 
 def plan_to_dict(p: Plan) -> dict:
@@ -117,17 +186,114 @@ async def list_plans(current_user: User = Depends(get_current_user)):
     if not current_user.is_admin:
         raise HTTPException(status_code=403, detail="Forbidden")
     plans = await Plan.find_all().to_list()
-    return [plan_to_dict(p) for p in plans]
+    # Fixed: return full plan objects or use a more robust conversion if needed
+    return [p.model_dump() if hasattr(p, 'model_dump') else p.dict() for p in plans]
 
 
 @router.post("/admin")
 async def create_plan(req: PlanCreate, current_user: User = Depends(get_current_user)):
     if not current_user.is_admin:
         raise HTTPException(status_code=403, detail="Forbidden")
-    plan = Plan(**req.dict())
+    plan = Plan(**req.model_dump())
     await plan.insert()
-    return plan_to_dict(plan)
+    return plan.model_dump()
 
+
+# ── STATIC ADMIN ROUTES (Must be ABOVE parameterized routes) ─────────────────
+
+@router.get("/admin/gateway-settings")
+async def get_gateway_settings(current_user: User = Depends(get_current_user)):
+    if not current_user.is_admin:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    
+    settings = await SystemSettings.find_one()
+    if not settings:
+        settings = SystemSettings()
+        await settings.insert()
+    
+    return settings
+
+
+@router.put("/admin/gateway-settings")
+async def update_gateway_settings(req: SystemSettingsSchema, current_user: User = Depends(get_current_user)):
+    if not current_user.is_admin:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    
+    settings = await SystemSettings.find_one()
+    if not settings:
+        settings = SystemSettings(**req.model_dump())
+        await settings.insert()
+    else:
+        for field, value in req.model_dump().items():
+            setattr(settings, field, value)
+        await settings.save()
+    
+    # Broadcast update to all connected clients (e.g. users on /plans)
+    try:
+        from app.api.ws import manager
+        await manager.broadcast({"type": "gateway_settings_updated", "data": {}})
+    except Exception as e:
+        print(f"WS Broadcast error: {e}")
+    
+    return settings
+
+
+@router.get("/admin/pending-payments")
+async def get_pending_payments(current_user: User = Depends(get_current_user)):
+    if not current_user.is_admin:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    
+    payments = await Payment.find(Payment.status == "pending").sort("-created_at").to_list()
+    return payments
+
+
+@router.get("/admin/payments")
+async def get_all_payments(current_user: User = Depends(get_current_user)):
+    if not current_user.is_admin:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    payments = await Payment.find_all().sort("-created_at").limit(200).to_list()
+    return payments
+
+
+@router.get("/admin/subscriptions")
+async def get_all_subscriptions_and_payments(current_user: User = Depends(get_current_user)):
+    """Admin only: Returns all active users with their current plans AND full payment history."""
+    if not current_user.is_admin:
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    users = await User.find(User.plan_id != None).to_list()
+    plans = await Plan.find_all().to_list()
+    plan_map = {str(p.id): p.name for p in plans}
+    
+    payments = await Payment.find_all().sort("-created_at").limit(200).to_list()
+    
+    return {
+        "active_users": [{
+            "id": str(u.id),
+            "email": u.email,
+            "full_name": u.full_name,
+            "plan_name": plan_map.get(str(u.plan_id), "Unknown"),
+            "is_active": u.is_active,
+            "services_active": getattr(u, "services_active", True)
+        } for u in users],
+        "all_payments": [{
+            "id": str(p.id),
+            "user_email": p.user_email,
+            "user_phone": p.user_phone,
+            "plan_name": p.plan_name,
+            "amount": p.amount,
+            "status": p.status,
+            "date": p.created_at.isoformat() if p.created_at else None,
+            "payment_id": p.razorpay_payment_id or p.transaction_ref,
+            "gateway": p.gateway,
+            "sub_gateway": p.sub_gateway,
+            "transaction_ref": p.transaction_ref,
+            "proof": p.proof_image_url
+        } for p in payments]
+    }
+
+
+# ── PARAMETERIZED ADMIN ROUTES ────────────────────────────────────────────────
 
 @router.put("/admin/{plan_id}")
 async def update_plan(plan_id: str, req: PlanUpdate, current_user: User = Depends(get_current_user)):
@@ -136,11 +302,10 @@ async def update_plan(plan_id: str, req: PlanUpdate, current_user: User = Depend
     plan = await Plan.get(ObjectId(plan_id))
     if not plan:
         raise HTTPException(status_code=404, detail="Plan not found")
-    for field, value in req.dict(exclude_none=True).items():
+    for field, value in req.model_dump(exclude_none=True).items():
         setattr(plan, field, value)
     await plan.save()
     
-    # ── Global Broadcast (Marketplace Sync) ──────────────────────────────
     try:
         from app.api.ws import manager
         await manager.broadcast({
@@ -149,7 +314,7 @@ async def update_plan(plan_id: str, req: PlanUpdate, current_user: User = Depend
         })
     except: pass
     
-    return plan_to_dict(plan)
+    return plan.model_dump()
 
 
 @router.delete("/admin/{plan_id}")
@@ -162,6 +327,37 @@ async def delete_plan(plan_id: str, current_user: User = Depends(get_current_use
     await User.find(User.plan_id == plan_id).update({"$set": {"plan_id": None}})
     await plan.delete()
     return {"message": "Plan deleted"}
+
+
+@router.post("/admin/verify-payment/{payment_id}")
+async def verify_payment_admin(payment_id: str, req: AdminVerifyPaymentReq, current_user: User = Depends(get_current_user)):
+    if not current_user.is_admin:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    
+    payment = await Payment.get(ObjectId(payment_id))
+    if not payment:
+        raise HTTPException(status_code=404, detail="Payment not found")
+    
+    if payment.status != "pending":
+        raise HTTPException(status_code=400, detail="Payment is already processed")
+    
+    payment.status = req.status
+    payment.admin_note = req.admin_note
+    payment.verified_at = datetime.now(timezone.utc)
+    await payment.save()
+    
+    if req.status == "success":
+        user = await User.get(ObjectId(payment.user_id))
+        if user:
+            days = 365 if payment.billing_cycle == "yearly" else 30
+            expiry = datetime.now(timezone.utc) + timedelta(days=days)
+            
+            user.plan_id = payment.plan_id
+            user.plan_expiry_at = expiry
+            user.billing_cycle = payment.billing_cycle
+            await user.save()
+            
+    return {"message": f"Payment {req.status} successful"}
 
 
 @router.post("/admin/assign-user/{user_id}")
@@ -203,7 +399,7 @@ async def list_public_plans(current_user: User = Depends(get_current_user)):
 @router.get("/my-plan")
 async def get_my_plan(current_user: User = Depends(get_current_user)):
     """Returns the active plan assigned to the currently authenticated user with expiry."""
-    if not current_user.plan_id:
+    if not current_user.plan_id or current_user.plan_id == "null":
         return {"plan": None, "expiry_at": None, "is_expired": False}
     
     try:
@@ -219,15 +415,18 @@ async def get_my_plan(current_user: User = Depends(get_current_user)):
         
         # Map of disabled_services IDs to plan field names
         service_map = {
-            "auto_reply": ["max_auto_replies"],
+            "auto_reply": ["max_auto_replies", "access_chat_message"],
             "scraper": ["access_group_scraping", "access_member_adding"],
             "reactions": ["max_reaction_channels"],
             "forwarder": ["max_forwarder_channels"],
             "member_adding": ["access_member_adding"],
-            "campaign": ["access_message_sender"],
+            "campaign": ["access_message_sender", "access_chat_message"],
             "creative": ["access_creative_tools"],
             "ban_checker": ["access_ban_checker"],
-            "terminal": ["access_terminal"]
+            "terminal": ["access_terminal"],
+            "contacts": ["access_contacts_manager"],
+            "reminders": ["access_reminders"],
+            "connect": ["access_connect"]
         }
 
         # 1. Apply Force-Disables (Highest Priority)
@@ -287,12 +486,19 @@ async def create_razorpay_order(req: CreateOrderReq, current_user: User = Depend
     if not plan.is_active:
         raise HTTPException(status_code=400, detail="Plan is not active")
 
+    settings = await SystemSettings.find_one()
+    if settings and not settings.razorpay_enabled:
+        raise HTTPException(status_code=400, detail="Razorpay is currently disabled")
+
     price = plan.price_yearly_inr if req.billing_cycle == "yearly" else plan.price_inr
     if price <= 0:
         raise HTTPException(status_code=400, detail="This plan requires manual activation. Contact admin.")
 
     try:
-        client = get_razorpay()
+        client = get_razorpay(
+            key_id=settings.razorpay_key_id if settings else None,
+            key_secret=settings.razorpay_key_secret if settings else None
+        )
         amount_paise = int(price * 100)  # Razorpay works in paise
         order = client.order.create({
             "amount": amount_paise,
@@ -310,7 +516,7 @@ async def create_razorpay_order(req: CreateOrderReq, current_user: User = Depend
             "order_id": order["id"],
             "amount": order["amount"],
             "currency": order["currency"],
-            "key_id": settings.RAZORPAY_KEY_ID,
+            "key_id": settings.razorpay_key_id if settings else getattr(settings, 'RAZORPAY_KEY_ID', None),
             "plan_name": f"{plan.name} ({req.billing_cycle.capitalize()})",
             "user_email": current_user.email,
             "user_name": getattr(current_user, "full_name", "") or current_user.email,
@@ -322,8 +528,6 @@ async def create_razorpay_order(req: CreateOrderReq, current_user: User = Depend
 @router.post("/verify-payment")
 async def verify_razorpay_payment(req: VerifyPaymentReq, current_user: User = Depends(get_current_user)):
     """Verify Razorpay payment signature and activate the plan for the user."""
-    from app.models.payment import Payment
-    from datetime import datetime, timedelta, timezone
     
     # 1. Block Replay Attacks (Check if Order ID is already processed)
     existing_payment = await Payment.find_one(Payment.razorpay_order_id == req.razorpay_order_id)
@@ -331,14 +535,20 @@ async def verify_razorpay_payment(req: VerifyPaymentReq, current_user: User = De
         raise HTTPException(status_code=400, detail="This transaction has already been processed.")
 
     # 2. Verify signature
+    settings_db = await SystemSettings.find_one()
+    key_secret = settings_db.razorpay_key_secret if settings_db and settings_db.razorpay_key_secret else getattr(settings, 'RAZORPAY_KEY_SECRET', None)
+    
+    if not key_secret:
+        raise HTTPException(status_code=500, detail="Razorpay secret key not configured")
+
     msg = f"{req.razorpay_order_id}|{req.razorpay_payment_id}"
-    expected = hmac.new(
-        settings.RAZORPAY_KEY_SECRET.encode(),
+    generated_signature = hmac.new(
+        key_secret.encode(),
         msg.encode(),
         hashlib.sha256
     ).hexdigest()
 
-    if expected != req.razorpay_signature:
+    if generated_signature != req.razorpay_signature:
         raise HTTPException(status_code=400, detail="Payment verification failed — invalid signature.")
 
     # 3. Prevent Client Parameter Tampering (Fetch Trusted Data from Razorpay)
@@ -380,9 +590,10 @@ async def verify_razorpay_payment(req: VerifyPaymentReq, current_user: User = De
     payment = Payment(
         user_id=str(current_user.id),
         user_email=current_user.email,
+        user_phone=current_user.phone,
         plan_id=trusted_plan_id,
         plan_name=f"{plan.name} ({trusted_billing_cycle})",
-        amount_inr=actual_price,
+        amount=actual_price, # Fixed: renamed to amount
         razorpay_order_id=req.razorpay_order_id,
         razorpay_payment_id=req.razorpay_payment_id,
         status="success"
@@ -395,6 +606,87 @@ async def verify_razorpay_payment(req: VerifyPaymentReq, current_user: User = De
         "plan": plan_to_dict(plan),
     }
 
+# ── Manual & Crypto Payments (User) ───────────────────────────────────────────
+
+@router.get("/gateways")
+async def get_active_gateways(current_user: User = Depends(get_current_user)):
+    """Returns all active payment gateways and their details."""
+    settings = await SystemSettings.find_one()
+    if not settings:
+        # Create default settings if not exists
+        settings = SystemSettings()
+        await settings.insert()
+    
+    return {
+        "razorpay_enabled": settings.razorpay_enabled,
+        "manual_payment_enabled": settings.manual_payment_enabled,
+        "crypto_payment_enabled": settings.crypto_payment_enabled,
+        "manual_gateways": [g for g in settings.manual_gateways if g.is_active] if settings.manual_payment_enabled else [],
+        "crypto_gateways": [g for g in settings.crypto_gateways if g.is_active] if settings.crypto_payment_enabled else [],
+    }
+
+@router.post("/initiate-manual")
+async def initiate_manual_payment(
+    plan_id: str = Form(...),
+    gateway: str = Form(...),
+    sub_gateway: str = Form(...),
+    transaction_ref: str = Form(...),
+    billing_cycle: str = Form(...),
+    file: UploadFile = File(...),
+    current_user: User = Depends(get_current_user)
+):
+    """User submits a manual or crypto payment proof with an image file."""
+    plan = await Plan.get(ObjectId(plan_id))
+    if not plan:
+        raise HTTPException(status_code=404, detail="Plan not found")
+    
+    settings = await SystemSettings.find_one()
+    if gateway == "manual" and (not settings or not settings.manual_payment_enabled):
+        raise HTTPException(status_code=400, detail="Manual payments are disabled")
+    if gateway == "crypto" and (not settings or not settings.crypto_payment_enabled):
+        raise HTTPException(status_code=400, detail="Crypto payments are disabled")
+
+    # 1. Prevent Duplicate Submissions (Ref ID check)
+    existing = await Payment.find_one(Payment.transaction_ref == transaction_ref)
+    if existing:
+        raise HTTPException(status_code=400, detail="This transaction ID has already been submitted. Please make a new payment and submit a new ID.")
+
+    # 1. Validate File Type
+    allowed = ['.jpg', '.jpeg', '.png', '.webp']
+    ext = os.path.splitext(file.filename)[1].lower()
+    if ext not in allowed:
+        raise HTTPException(status_code=400, detail="Invalid proof file. Please upload a JPG, PNG, or WEBP image.")
+
+    # 2. Save proof image
+    os.makedirs("uploads/proofs", exist_ok=True)
+    safe_name = f"proof_{int(datetime.now().timestamp())}_{ObjectId()}{ext}"
+    file_path = f"uploads/proofs/{safe_name}"
+    with open(file_path, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+    
+    proof_url = f"uploads/proofs/{safe_name}"
+
+    price = plan.price_yearly_inr if billing_cycle == "yearly" else plan.price_inr
+    
+    payment = Payment(
+        user_id=str(current_user.id),
+        user_email=current_user.email,
+        user_phone=current_user.phone,
+        plan_id=plan_id,
+        plan_name=f"{plan.name} ({billing_cycle})",
+        amount=price,
+        gateway=gateway,
+        sub_gateway=sub_gateway,
+        status="pending",
+        transaction_ref=transaction_ref,
+        proof_image_url=proof_url, # Now stores the local server URL
+        billing_cycle=billing_cycle
+    )
+    await payment.insert()
+    
+    return {"message": "Payment submitted for verification. Admin will review it shortly.", "payment_id": str(payment.id)}
+
+
 @router.get("/my-payments")
 async def get_my_payments(current_user: User = Depends(get_current_user)):
     """Returns the payment history for the currently authenticated user."""
@@ -402,46 +694,15 @@ async def get_my_payments(current_user: User = Depends(get_current_user)):
     return [{
         "id": str(p.id),
         "plan_name": p.plan_name,
-        "amount": p.amount_inr,
+        "amount": p.amount,
+        "gateway": p.gateway,
+        "sub_gateway": p.sub_gateway,
         "status": p.status,
         "date": p.created_at.isoformat(),
-        "payment_id": p.razorpay_payment_id
+        "payment_id": p.razorpay_payment_id or p.transaction_ref
     } for p in payments]
 
-@router.get("/admin/subscriptions")
-async def get_all_subscriptions_and_payments(current_user: User = Depends(get_current_user)):
-    """Admin only: Returns all active users with their current plans AND full payment history."""
-    if not current_user.is_admin:
-        raise HTTPException(status_code=403, detail="Forbidden")
-    
-    from app.models.payment import Payment
-    from app.models.user import User
-    from app.models.plan import Plan
 
-    # Get all users who have a plan
-    users = await User.find(User.plan_id != None).to_list()
-    plans = await Plan.find_all().to_list()
-    plan_map = {str(p.id): p.name for p in plans}
-    
-    # Get recent payments (Limit to 200 for performance)
-    payments = await Payment.find_all().sort("-created_at").limit(200).to_list()
-    
-    return {
-        "active_users": [{
-            "id": str(u.id),
-            "email": u.email,
-            "full_name": u.full_name,
-            "plan_name": plan_map.get(str(u.plan_id), "Unknown"),
-            "is_active": u.is_active,
-            "services_active": getattr(u, "services_active", True)
-        } for u in users],
-        "all_payments": [{
-            "id": str(p.id),
-            "user_email": p.user_email,
-            "plan_name": p.plan_name,
-            "amount": p.amount_inr,
-            "status": p.status,
-            "date": p.created_at.isoformat() if p.created_at else None,
-            "payment_id": p.razorpay_payment_id
-        } for p in payments]
-    }
+# ── Admin Gateway & Payment Management ────────────────────────────────────────
+
+# (Redundant routes moved up)

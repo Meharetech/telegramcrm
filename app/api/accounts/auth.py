@@ -82,10 +82,18 @@ async def _cleanup_expired_pending():
 async def get_upload_progress(temp_id: str):
     return {"progress": upload_progresses.get(temp_id, 0)}
 
+class ProxyInput(BaseModel):
+    host: str
+    port: int
+    protocol: str
+    username: Optional[str] = None
+    password: Optional[str] = None
+
 class ConnectRequest(BaseModel):
     phone: str
     api_id: int
     api_hash: str
+    proxy: Optional[ProxyInput] = None
 
 class VerifyRequest(BaseModel):
     phone: str
@@ -129,21 +137,42 @@ async def send_code(request: Request, req: ConnectRequest, current_user: User = 
             pair = random.choice(apis)
             api_id = pair.api_id
             api_hash = pair.api_hash
+        else:
+            raise HTTPException(status_code=400, detail="⚠️ API keys missing! Add to Matrix or enter manually.")
 
-    # Fetch free proxy
-    proxy_record = await Proxy.find_one(Proxy.user_id == str(current_user.id), Proxy.assigned_account_id == None)
     proxy_dict = None
-    if proxy_record:
-        rdns_val = True if proxy_record.protocol.lower() != "http" else False
+    proxy_id = None
+
+    if req.proxy:
+        # Use custom proxy provided in request
+        proxy_type = socks.HTTP if req.proxy.protocol.lower() == "http" else socks.SOCKS5
         proxy_dict = {
             "proxy_type": proxy_type,
-            "addr": proxy_record.host,
-            "port": proxy_record.port,
-            "rdns": rdns_val
+            "addr": req.proxy.host,
+            "port": req.proxy.port,
+            "rdns": True
         }
-        if proxy_record.username: proxy_dict["username"] = proxy_record.username
-        if proxy_record.password: proxy_dict["password"] = proxy_record.password
-        print(f"[auth] Using {proxy_record.protocol.upper()} proxy: {proxy_record.host}:{proxy_record.port} (rdns={rdns_val})")
+        if req.proxy.username: proxy_dict["username"] = req.proxy.username
+        if req.proxy.password: proxy_dict["password"] = req.proxy.password
+    else:
+        # Fetch free proxy from database
+        proxy_record = await Proxy.find_one(Proxy.user_id == str(current_user.id), Proxy.assigned_account_id == None)
+        if proxy_record:
+            proxy_type = socks.HTTP if proxy_record.protocol.lower() == "http" else socks.SOCKS5
+            proxy_dict = {
+                "proxy_type": proxy_type,
+                "addr": proxy_record.host,
+                "port": proxy_record.port,
+                "rdns": True
+            }
+            if proxy_record.username: proxy_dict["username"] = proxy_record.username
+            if proxy_record.password: proxy_dict["password"] = proxy_record.password
+            print(f"[auth] Using {proxy_record.protocol.upper()} proxy: {proxy_record.host}:{proxy_record.port}")
+        else:
+            raise HTTPException(
+                status_code=403, 
+                detail="🛡️ Proxy Required! Add proxy to continue safely."
+            )
 
     device = get_random_device()
     client = TelegramClient(StringSession(), api_id, api_hash, device_model=device, proxy=proxy_dict)
@@ -160,7 +189,7 @@ async def send_code(request: Request, req: ConnectRequest, current_user: User = 
             "device_model": device,
             "user_id": str(current_user.id),
             "created_at": time.time(),
-            "proxy_id": str(proxy_record.id) if proxy_record else None
+            "proxy_id": proxy_id
         }
         return {"phone_code_hash": sent.phone_code_hash, "message": "Code sent"}
     except Exception as e:
@@ -333,19 +362,41 @@ async def qr_login_init(req: ConnectRequest, background_tasks: BackgroundTasks, 
             pair = random.choice(apis)
             api_id = pair.api_id
             api_hash = pair.api_hash
+        else:
+            raise HTTPException(status_code=400, detail="⚠️ API keys missing! Add to Matrix or enter manually.")
 
-    proxy_record = await Proxy.find_one(Proxy.user_id == str(current_user.id), Proxy.assigned_account_id == None)
     proxy_dict = None
-    if proxy_record:
-        proxy_type = socks.HTTP if proxy_record.protocol.lower() == "http" else socks.SOCKS5
+    proxy_id = None
+
+    if req.proxy:
+        # Use custom proxy
+        proxy_type = socks.HTTP if req.proxy.protocol.lower() == "http" else socks.SOCKS5
         proxy_dict = {
             "proxy_type": proxy_type,
-            "addr": proxy_record.host,
-            "port": proxy_record.port,
+            "addr": req.proxy.host,
+            "port": req.proxy.port,
             "rdns": True
         }
-        if proxy_record.username: proxy_dict["username"] = proxy_record.username
-        if proxy_record.password: proxy_dict["password"] = proxy_record.password
+        if req.proxy.username: proxy_dict["username"] = req.proxy.username
+        if req.proxy.password: proxy_dict["password"] = req.proxy.password
+    else:
+        proxy_record = await Proxy.find_one(Proxy.user_id == str(current_user.id), Proxy.assigned_account_id == None)
+        if proxy_record:
+            proxy_type = socks.HTTP if proxy_record.protocol.lower() == "http" else socks.SOCKS5
+            proxy_dict = {
+                "proxy_type": proxy_type,
+                "addr": proxy_record.host,
+                "port": proxy_record.port,
+                "rdns": True
+            }
+            if proxy_record.username: proxy_dict["username"] = proxy_record.username
+            if proxy_record.password: proxy_dict["password"] = proxy_record.password
+            proxy_id = str(proxy_record.id)
+        else:
+            raise HTTPException(
+                status_code=403, 
+                detail="🛡️ Proxy Required! Add proxy to continue safely."
+            )
 
     device = get_random_device()
     client = TelegramClient(StringSession(), api_id, api_hash, device_model=device, proxy=proxy_dict)
@@ -365,7 +416,7 @@ async def qr_login_init(req: ConnectRequest, background_tasks: BackgroundTasks, 
             "status": "pending",
             "url": qr_login.url,
             "created_at": time.time(),
-            "proxy_id": str(proxy_record.id) if proxy_record else None
+            "proxy_id": proxy_id
         }
         
         # Start background task to wait for scan

@@ -13,12 +13,156 @@ from slowapi import Limiter
 from slowapi.util import get_remote_address
 limiter = Limiter(key_func=get_remote_address)
 
+import random
+import string
+from datetime import datetime, timedelta, timezone
+from app.services.email_service import send_otp_email, send_registration_otp_email
+
 router = APIRouter()
+
+class ForgotPasswordRequest(BaseModel):
+    email: EmailStr
+
+class ResetPasswordRequest(BaseModel):
+    email: EmailStr
+    otp: str
+    new_password: str
+
+@router.post("/forgot-password")
+async def forgot_password_request(req: ForgotPasswordRequest):
+    user = await User.find_one(User.email == req.email)
+    if not user:
+        # Don't explicitly say the email doesn't exist for security
+        return {"message": "If your email is registered, you will receive an OTP."}
+
+    # Generate 6-digit code
+    otp = "".join(random.choices(string.digits, k=6))
+    
+    # Save code to DB with expiry (10 mins)
+    user.reset_code = otp
+    user.reset_code_expiry = datetime.now(timezone.utc) + timedelta(minutes=10)
+    await user.save()
+
+    # Send email
+    sent = send_otp_email(user.email, otp)
+    if not sent:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to send OTP email. Please ensure your SMTP configuration in .env is correct."
+        )
+
+    return {"message": "A 6-digit verification code has been sent to your email."}
+
+@router.post("/reset-password")
+async def reset_password_with_otp(req: ResetPasswordRequest):
+    user = await User.find_one(User.email == req.email)
+    if not user:
+        raise HTTPException(status_code=400, detail="Invalid email or code.")
+
+    # Check if code exists and matches
+    if not user.reset_code or user.reset_code != req.otp:
+        raise HTTPException(status_code=400, detail="Invalid verification code.")
+
+    # Check expiry
+    now = datetime.now(timezone.utc)
+    # Ensure both are offset-aware or use .replace(tzinfo=None) if they're naive
+    # MongoDB datetimes are usually naive but treated as UTC.
+    # Beanie usually returns offset-naive datetime objects (UTC).
+    # datetime.now(timezone.utc).replace(tzinfo=None) or keep them offset-aware.
+    
+    # Check if user.reset_code_expiry has tzinfo
+    expiry = user.reset_code_expiry
+    if expiry and expiry.tzinfo is None:
+        expiry = expiry.replace(tzinfo=timezone.utc)
+
+    if not expiry or expiry < now:
+        raise HTTPException(status_code=400, detail="Verification code has expired.")
+
+    # Reset password
+    user.hashed_password = get_password_hash(req.new_password)
+    user.reset_code = None
+    user.reset_code_expiry = None
+    await user.save()
+
+    return {"message": "Password updated successfully. You can now login."}
 
 class UserRegister(BaseModel):
     email: EmailStr
+    phone: Optional[str] = None
     password: str
     full_name: Optional[str] = None
+
+class VerifyOTP(BaseModel):
+    email: str
+    otp: str
+
+@router.post("/register", response_model=dict)
+@limiter.limit("5/minute")
+async def register(req: UserRegister, request: Request):
+    existing_user = await User.find_one(User.email == req.email)
+    if existing_user:
+        if existing_user.is_active:
+            raise HTTPException(status_code=400, detail="User with this email already exists")
+        else:
+            # Re-registering an inactive user (maybe they didn't verify)
+            # Update password and re-send OTP
+            otp = "".join(random.choices(string.digits, k=6))
+            existing_user.hashed_password = get_password_hash(req.password)
+            existing_user.reg_otp = otp
+            existing_user.reg_otp_expiry = datetime.now(timezone.utc) + timedelta(minutes=10)
+            existing_user.phone = req.phone
+            existing_user.full_name = req.full_name
+            await existing_user.save()
+            send_registration_otp_email(existing_user.email, otp)
+            return {"message": "A verification code has been sent to your email."}
+    
+    # New user
+    otp = "".join(random.choices(string.digits, k=6))
+    hashed_password = get_password_hash(req.password)
+    user = User(
+        email=req.email,
+        phone=req.phone,
+        hashed_password=hashed_password,
+        full_name=req.full_name,
+        is_active=False,
+        reg_otp=otp,
+        reg_otp_expiry=datetime.now(timezone.utc) + timedelta(minutes=10)
+    )
+    await user.insert()
+    
+    # Send email
+    send_registration_otp_email(user.email, otp)
+    
+    return {"message": "User registered successfully. Please verify your email with the OTP sent."}
+
+@router.post("/verify-otp")
+async def verify_registration_otp(req: VerifyOTP):
+    user = await User.find_one(User.email == req.email)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    if user.is_active:
+        return {"message": "User already verified."}
+
+    if user.reg_otp != req.otp:
+        raise HTTPException(status_code=400, detail="Invalid verification code.")
+
+    # Check expiry
+    now = datetime.now(timezone.utc)
+    expiry = user.reg_otp_expiry
+    if expiry and expiry.tzinfo is None:
+        expiry = expiry.replace(tzinfo=timezone.utc)
+
+    if not expiry or expiry < now:
+        raise HTTPException(status_code=400, detail="Code has expired.")
+
+    # Activate
+    user.is_active = True
+    user.reg_otp = None
+    user.reg_otp_expiry = None
+    await user.save()
+
+    return {"message": "Account verified successfully! You can now login."}
 
 class UserLogin(BaseModel):
     email: EmailStr
@@ -29,28 +173,18 @@ class Token(BaseModel):
     token_type: str
     user: dict
 
-@router.post("/register", response_model=dict)
-@limiter.limit("5/minute")
-async def register(req: UserRegister, request: Request):
-    existing_user = await User.find_one(User.email == req.email)
-    if existing_user:
-        raise HTTPException(status_code=400, detail="User with this email already exists")
-    
-    hashed_password = get_password_hash(req.password)
-    user = User(
-        email=req.email,
-        hashed_password=hashed_password,
-        full_name=req.full_name
-    )
-    await user.insert()
-    return {"message": "User registered successfully"}
-
 @router.post("/login", response_model=Token)
 @limiter.limit("10/minute")
 async def login(req: UserLogin, request: Request):
     user = await User.find_one(User.email == req.email)
     if not user or not verify_password(req.password, user.hashed_password):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid email or password")
+    
+    if not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, 
+            detail="Account not verified. Please check your email for the OTP."
+        )
     
     access_token = create_access_token(data={"sub": str(user.id)})
     return {
@@ -59,6 +193,7 @@ async def login(req: UserLogin, request: Request):
         "user": {
             "id": str(user.id),
             "email": user.email,
+            "phone": user.phone,
             "full_name": user.full_name,
             "is_admin": user.is_admin
         }
@@ -77,6 +212,7 @@ async def admin_login(req: UserLogin):
         "user": {
             "id": str(user.id),
             "email": user.email,
+            "phone": user.phone,
             "full_name": user.full_name,
             "is_admin": user.is_admin
         }
@@ -87,11 +223,34 @@ async def get_admin_stats(current_user: User = Depends(get_current_user)):
     if not current_user.is_admin:
         raise HTTPException(status_code=403, detail="Forbidden")
     
+    from datetime import datetime, time, timezone
+    from app.models import Payment
+    
+    now = datetime.now(timezone.utc)
+    today_start = datetime.combine(now.date(), time.min, tzinfo=timezone.utc)
+
     total_users = await User.count()
+    total_accounts = await TelegramAccount.count()
+    total_proxies = await Proxy.count()
+    
+    # Daily metrics
+    new_users_today = await User.find({"created_at": {"$gte": today_start}}).count()
+    active_services_users = await User.find({"services_active": True}).count()
+    
+    # Daily Revenue (INR)
+    payments_today = await Payment.find({
+        "status": "success",
+        "verified_at": {"$gte": today_start}
+    }).to_list()
+    daily_revenue = sum(p.amount for p in payments_today if p.amount)
+
     return {
         "total_users": total_users,
-        "total_accounts": await TelegramAccount.count(),
-        "total_proxies": await Proxy.count(),
+        "total_accounts": total_accounts,
+        "total_proxies": total_proxies,
+        "new_users_today": new_users_today,
+        "active_services_users": active_services_users,
+        "daily_revenue": daily_revenue,
         "system_health": "99.9%",
         "uptime_days": 42
     }
@@ -112,7 +271,8 @@ async def get_service_usage(current_user: User = Depends(get_current_user)):
             match_stage,
             {"$group": {"_id": "$user_id", "count": {"$sum": 1}}}
         ]
-        results = await model.get_motor_collection().aggregate(pipeline).to_list(length=None)
+        cursor = model.get_pymongo_collection().aggregate(pipeline)
+        results = await cursor.to_list(length=None)
         return {str(item["_id"]): item["count"] for item in results if item.get("_id")}
 
     import asyncio
@@ -207,6 +367,7 @@ async def list_admin_users(
                 "id": str(u.id),
                 "email": u.email,
                 "full_name": u.full_name,
+                "phone": u.phone,
                 "is_active": u.is_active,
                 "is_admin": u.is_admin,
                 "is_super_admin": u.is_super_admin,
@@ -224,6 +385,7 @@ async def list_admin_users(
 class UserUpdate(BaseModel):
     full_name: Optional[str] = None
     email: Optional[str] = None
+    phone: Optional[str] = None
     is_active: Optional[bool] = None
     is_admin: Optional[bool] = None
     is_super_admin: Optional[bool] = None
@@ -254,6 +416,7 @@ async def update_admin_user(user_id: str, req: UserUpdate, current_user: User = 
     
     if req.full_name is not None: user.full_name = req.full_name
     if req.email is not None: user.email = req.email
+    if req.phone is not None: user.phone = req.phone
     if req.is_active is not None: user.is_active = req.is_active
     if req.is_admin is not None: user.is_admin = req.is_admin
     if req.is_super_admin is not None: user.is_super_admin = req.is_super_admin
@@ -306,43 +469,6 @@ class UserAPISettings(BaseModel):
     telegram_apis: list[dict]
 
 @router.get("/profile")
-async def get_user_profile(current_user: User = Depends(get_current_user)):
-    """Fetch user profile and plan details."""
-    from app.models.plan import Plan
-    
-    plan_name = "Free Plan"
-    plan_details = None
-    
-    if current_user.plan_id:
-        plan = await Plan.get(current_user.plan_id)
-        if plan:
-            plan_name = plan.name
-            plan_details = plan.dict()
-
-    return {
-        "id": str(current_user.id),
-        "email": current_user.email,
-        "full_name": current_user.full_name,
-        "plan_name": plan_name,
-        "plan_details": plan_details,
-        "plan_expiry": current_user.plan_expiry_at.isoformat() if current_user.plan_expiry_at else None,
-        "is_active": current_user.is_active,
-        "services_active": current_user.services_active,
-        "created_at": current_user.created_at.isoformat() if hasattr(current_user, 'created_at') and current_user.created_at else None
-    }
-
-@router.get("/me")
-async def get_me(current_user: User = Depends(get_current_user)):
-    apis = await TelegramAPI.find(TelegramAPI.user_id == str(current_user.id)).to_list()
-    return {
-        "id": str(current_user.id),
-        "email": current_user.email,
-        "full_name": current_user.full_name,
-        "telegram_apis": [{"api_id": a.api_id, "api_hash": a.api_hash} for a in apis],
-        "is_active": current_user.is_active
-    }
-
-@router.get("/profile")
 async def get_profile(current_user: User = Depends(get_current_user)):
     from app.models import Plan
     from bson import ObjectId
@@ -356,28 +482,25 @@ async def get_profile(current_user: User = Depends(get_current_user)):
                     "id": str(plan.id),
                     "name": plan.name,
                     "price_inr": plan.price_inr,
-                    "price_yearly_inr": plan.price_yearly_inr,
                     "max_accounts": plan.max_accounts,
                     "max_api_keys": plan.max_api_keys,
-                    "max_scraper_tasks": getattr(plan, 'max_scraper_tasks', 0),
                     "daily_contacts_limit": getattr(plan, 'daily_contacts_limit', 50),
                     "can_auto_reply": getattr(plan, 'can_auto_reply', False),
                     "can_forward": getattr(plan, 'can_forward', False),
                     "can_react": getattr(plan, 'can_react', False)
                 }
-        except:
-            pass
+        except: pass
 
     return {
         "id": str(current_user.id),
         "email": current_user.email,
+        "phone": current_user.phone,
         "full_name": current_user.full_name,
         "is_active": current_user.is_active,
-        "created_at": current_user.created_at.isoformat() if hasattr(current_user, 'created_at') and current_user.created_at else None,
-        "plan_id": current_user.plan_id,
+        "created_at": current_user.created_at.isoformat() if current_user.created_at else None,
+        "plan": plan_details,
         "plan_expiry_at": current_user.plan_expiry_at.isoformat() if current_user.plan_expiry_at else None,
-        "billing_cycle": current_user.billing_cycle,
-        "plan": plan_details
+        "billing_cycle": current_user.billing_cycle
     }
 
 @router.get("/settings")

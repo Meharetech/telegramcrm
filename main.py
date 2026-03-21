@@ -9,7 +9,7 @@ from beanie import init_beanie
 from app.models import (
     User, TelegramAccount, ForwarderRule, TelegramAPI, Reminder,
     Proxy, SystemLog, ReactionTask, MemberAddSettings, MemberAddJob,
-    MessageCampaignJob, Plan, Payment
+    MessageCampaignJob, Plan, Payment, SystemSettings
 )
 from app.models.auto_reply import AutoReplyRule, AutoReplySettings
 from app.api.accounts import router as account_router
@@ -172,7 +172,8 @@ async def lifespan(app: FastAPI):
             document_models=[
                 User, TelegramAccount, AutoReplyRule, AutoReplySettings,
                 ForwarderRule, TelegramAPI, ReactionTask, Reminder, Proxy, SystemLog,
-                MemberAddSettings, MemberAddJob, MessageCampaignJob, Plan, Payment
+                MemberAddSettings, MemberAddJob, MessageCampaignJob, Plan, Payment,
+                SystemSettings
             ]
         )
 

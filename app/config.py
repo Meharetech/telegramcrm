@@ -32,6 +32,13 @@ class Settings(BaseSettings):
     MA_COOLDOWN_MAX: int = 86400    # Absolute max cooldown for any error
     MA_COOLDOWN_24H: int = 86400
 
+    # Email Settings (for OTP)
+    SMTP_HOST: str = "smtp.gmail.com"
+    SMTP_PORT: int = 587
+    SMTP_USER: str = ""
+    SMTP_PASS: str = ""
+    SMTP_FROM: str = ""
+
     @field_validator("DEFAULT_API_ID", mode="before")
     @classmethod
     def empty_str_to_none(cls, v):
