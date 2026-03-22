@@ -74,6 +74,11 @@ class PlanCreate(BaseModel):
     access_message_sender: bool = False
     access_group_scraping: bool = False
     access_connect: bool = True
+    access_ban_checker: bool = False
+    access_creative_tools: bool = False
+    access_contacts_manager: bool = False
+    access_reminders: bool = False
+    access_terminal: bool = False
 
 
 class PlanUpdate(BaseModel):
@@ -93,6 +98,11 @@ class PlanUpdate(BaseModel):
     access_message_sender: Optional[bool] = None
     access_group_scraping: Optional[bool] = None
     access_connect: Optional[bool] = None
+    access_ban_checker: Optional[bool] = None
+    access_creative_tools: Optional[bool] = None
+    access_contacts_manager: Optional[bool] = None
+    access_reminders: Optional[bool] = None
+    access_terminal: Optional[bool] = None
 
 
 class AssignPlan(BaseModel):
@@ -186,8 +196,7 @@ async def list_plans(current_user: User = Depends(get_current_user)):
     if not current_user.is_admin:
         raise HTTPException(status_code=403, detail="Forbidden")
     plans = await Plan.find_all().to_list()
-    # Fixed: return full plan objects or use a more robust conversion if needed
-    return [p.model_dump() if hasattr(p, 'model_dump') else p.dict() for p in plans]
+    return [plan_to_dict(p) for p in plans]
 
 
 @router.post("/admin")
@@ -196,7 +205,7 @@ async def create_plan(req: PlanCreate, current_user: User = Depends(get_current_
         raise HTTPException(status_code=403, detail="Forbidden")
     plan = Plan(**req.model_dump())
     await plan.insert()
-    return plan.model_dump()
+    return plan_to_dict(plan)
 
 
 # ── STATIC ADMIN ROUTES (Must be ABOVE parameterized routes) ─────────────────
@@ -314,7 +323,7 @@ async def update_plan(plan_id: str, req: PlanUpdate, current_user: User = Depend
         })
     except: pass
     
-    return plan.model_dump()
+    return plan_to_dict(plan)
 
 
 @router.delete("/admin/{plan_id}")
