@@ -54,11 +54,8 @@ async def run_system_maintenance():
             # 2. RAM: Force Garbage Collection
             collected = gc.collect()
             
-            # 3. RAM: Clear Telethon Internal Entity Caches
-            from app.client_cache import _cache
-            for client in _cache.values():
-                if client and client.is_connected():
-                    client._entity_cache.clear()
+            # 3. RAM: Clear internal pools if necessary (placeholder or remove)
+            pass
             
             logger.info(f"[system] Maintenance complete. GC collected {collected} objects.")
         except Exception as e:
@@ -220,15 +217,8 @@ app = FastAPI(
 # Configure CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "https://telegramcrmai.com",
-        "https://www.telegramcrmai.com",
-        "https://telegramcrmai.shop",
-        "https://www.telegramcrmai.shop",
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-    ],
-    allow_credentials=True,
+    allow_origins=["*"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
     expose_headers=["*"],

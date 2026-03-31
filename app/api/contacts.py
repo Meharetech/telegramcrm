@@ -17,8 +17,9 @@ from telethon.tl.functions.contacts import (
     DeleteContactsRequest,
     GetContactsRequest,
     ImportContactsRequest,
+    AddContactRequest
 )
-from telethon.tl.types import InputPhoneContact
+from telethon.tl.types import InputPhoneContact, InputPeerUser
 
 from app.api.auth_utils import get_current_user
 from app.client_cache import get_client
@@ -86,40 +87,74 @@ class ActiveDistribution:
                         if not batch: break
                         
                         batch_idx += 1
-                        tg_batch = []
+                        phone_batch = []
+                        non_phone_batch = []
+
                         for c_idx, c in enumerate(batch):
-                            phone = _normalise_phone(c.get("phone", ""))
-                            if not phone: continue
-                            tg_batch.append(InputPhoneContact(
-                                client_id=c_idx, phone=phone,
-                                first_name=c.get("first_name") or "User",
-                                last_name=c.get("last_name") or "",
-                            ))
-                        
-                        if tg_batch:
+                            phone = c.get("phone")
+                            if phone:
+                                phone_batch.append(InputPhoneContact(
+                                    client_id=c_idx, phone=phone,
+                                    first_name=c.get("first_name") or "User",
+                                    last_name=c.get("last_name") or "",
+                                ))
+                            else:
+                                non_phone_batch.append(c)
+
+                        batch_found = 0
+                        # 1. Handle Bulk Phone Imports
+                        if phone_batch:
                             try:
-                                res = await client(ImportContactsRequest(tg_batch))
-                                found_now = len(res.users)
-                                acc_added += found_now
-                                self.total_added += found_now
-                                
+                                res = await client(ImportContactsRequest(phone_batch))
+                                batch_found += len(res.users)
                                 acc.contact_count += len(res.imported)
-                                acc.contacts_added_today += found_now
-                                await acc.save()
+                            except Exception as e:
+                                await self.add_log("warning", {"phone": acc.phone_number, "message": f"Bulk Import Error: {str(e)}"})
+
+                        # 2. Handle Individual Non-Phone Imports (ID/Hash or Username)
+                        for npc in non_phone_batch:
+                            try:
+                                target_user = None
+                                if npc.get("tg_id") and npc.get("access_hash"):
+                                    target_user = InputPeerUser(int(npc["tg_id"]), int(npc["access_hash"]))
+                                elif npc.get("username"):
+                                    target_user = npc["username"]
                                 
-                                await self.add_log("batch_done", {
-                                    "phone": acc.phone_number,
-                                    "batch": batch_idx,
-                                    "added": found_now,
-                                    "total_so_far": acc_added,
-                                    "target": target_for_this_acc
-                                })
-                                await asyncio.sleep(BATCH_DELAY if found_now > 0 else 2)
-                            except FloodWaitError as fe:
-                                await self.add_log("warning", {"phone": acc.phone_number, "message": f"FloodWait: Sleeping {fe.seconds}s"})
-                                await asyncio.sleep(fe.seconds + 2)
-                            except Exception as be:
-                                await self.add_log("warning", {"phone": acc.phone_number, "message": str(be)})
+                                if target_user:
+                                    await client(AddContactRequest(
+                                        id=target_user,
+                                        first_name=npc.get("first_name") or "User",
+                                        last_name=npc.get("last_name") or "",
+                                        phone="", 
+                                        add_phone_privacy_exception=False
+                                    ))
+                                    batch_found += 1
+                                    acc.contact_count += 1
+                            except Exception as e:
+                                await self.add_log("warning", {"phone": acc.phone_number, "message": f"Single Add Error: {str(e)}"})
+
+                        if batch_found > 0:
+                            acc_added += batch_found
+                            self.total_added += batch_found
+                            
+                            # Daily Reset Check
+                            now_utc = datetime.utcnow()
+                            if acc.last_contact_add_date and acc.last_contact_add_date.date() < now_utc.date():
+                                acc.contacts_added_today = 0
+                                logger.info(f"[distribute] Resetting daily counter for {acc.phone_number}")
+
+                            acc.contacts_added_today += batch_found
+                            acc.last_contact_add_date = now_utc
+                            await acc.save()
+                            
+                            await self.add_log("batch_done", {
+                                "phone": acc.phone_number,
+                                "batch": batch_idx,
+                                "added": batch_found,
+                                "total_so_far": acc_added,
+                                "target": target_for_this_acc
+                            })
+                            await asyncio.sleep(BATCH_DELAY)
 
                     await self.add_log("account_done", {"phone": acc.phone_number, "added": acc_added})
 
@@ -147,8 +182,8 @@ DISTRIBUTION_TASKS: Dict[str, ActiveDistribution] = {}
 class DeleteRequest(BaseModel):
     user_ids: List[int]
 
-class AddContactRequest(BaseModel):
-    contacts: List[dict]   # [{first_name, last_name, phone}]
+class ManualAddRequest(BaseModel):
+    contacts: List[dict]   # [{first_name, last_name, phone, tg_id, access_hash, username}]
 
 class AccountConfig(BaseModel):
     id: str
@@ -223,24 +258,37 @@ def _parse_vcf(text: str) -> List[dict]:
 
 
 def _parse_csv(text: str) -> List[dict]:
-    """Try common column names: name/first_name/last_name/phone/number."""
+    """Support Scraper V2 format and generic CSVs."""
     contacts = []
+    # Use DictReader to handle headers safely
     reader = csv.DictReader(io.StringIO(text))
     for row in reader:
+        # Normalize keys for flexibility
         keys = {k.lower().strip(): v for k, v in row.items() if v}
-        phone_raw = (
-            keys.get("phone") or keys.get("number") or
-            keys.get("mobile") or keys.get("tel") or ""
-        )
+        
+        # Priority 1: Phone
+        phone_raw = keys.get("phone") or keys.get("number") or keys.get("mobile") or keys.get("tel") or ""
         phone = _normalise_phone(phone_raw)
-        if not phone:
+        
+        # Priority 2: Telegram specific identifiers (from our Scraper)
+        tg_id = keys.get("id") or keys.get("telegram_id")
+        access_hash = keys.get("access hash") or keys.get("access_hash")
+        username = keys.get("username")
+        
+        # If we have nothing usable, skip
+        if not phone and not username and not (tg_id and access_hash):
             continue
+
         full = keys.get("name") or keys.get("full_name") or ""
         parts = full.split(" ", 1) if full else ["", ""]
+        
         contacts.append({
-            "first_name": keys.get("first_name") or parts[0],
+            "first_name": keys.get("first_name") or parts[0] or "Contact",
             "last_name":  keys.get("last_name")  or (parts[1] if len(parts) > 1 else ""),
             "phone":      phone,
+            "tg_id":      tg_id,
+            "access_hash": access_hash,
+            "username":   username.lstrip("@") if username else ""
         })
     return contacts
 
@@ -572,7 +620,7 @@ async def parse_file(
 @router.post("/{account_id}/add")
 async def add_contacts(
     account_id: str,
-    body: AddContactRequest,
+    body: ManualAddRequest,
     current_user: User = Depends(get_current_user),
 ):
     if not body.contacts:
@@ -586,35 +634,64 @@ async def add_contacts(
     total_processed = 0 # Match behavior with distribution
     for i in range(0, len(body.contacts), BATCH_SIZE):
         batch = body.contacts[i:i + BATCH_SIZE]
-        tg_batch = []
-        for idx, c in enumerate(batch):
-            phone = _normalise_phone(c.get("phone", ""))
-            if not phone:
-                errors.append({"index": i + idx, "error": "missing phone"})
-                continue
-            tg_batch.append(InputPhoneContact(
-                client_id=i + idx,
-                phone=phone,
-                first_name=c.get("first_name") or "Unknown",
-                last_name=c.get("last_name") or "",
-            ))
-        if tg_batch:
-            try:
-                res = await client(ImportContactsRequest(tg_batch))
-                added_now = len(res.imported)
-                found_now = len(res.users)
-                added += added_now
-                total_processed += found_now
-                
-                if acc:
-                    acc.contact_count += added_now
-                    acc.contacts_added_today += found_now
-                    await acc.save()
+        
+        phone_batch = []
+        non_phone_batch = []
 
-            except FloodWaitError as e:
-                await asyncio.sleep(e.seconds + 2)
+        for idx, c in enumerate(batch):
+            phone = c.get("phone")
+            if phone:
+                phone_batch.append(InputPhoneContact(
+                    client_id=i + idx,
+                    phone=phone,
+                    first_name=c.get("first_name") or "Unknown",
+                    last_name=c.get("last_name") or "",
+                ))
+            else:
+                non_phone_batch.append(c)
+
+        batch_found = 0
+        # 1. Bulk Phone Imports
+        if phone_batch:
+            try:
+                res = await client(ImportContactsRequest(phone_batch))
+                batch_found += len(res.users)
+                if acc: acc.contact_count += len(res.imported)
             except Exception as ex:
-                errors.append({"batch": i, "error": str(ex)})
+                errors.append({"batch": i, "error": f"Bulk Import: {str(ex)}"})
+
+        # 2. Individual Non-Phone Imports
+        for npc in non_phone_batch:
+            try:
+                target_user = None
+                if npc.get("tg_id") and npc.get("access_hash"):
+                    target_user = InputPeerUser(int(npc["tg_id"]), int(npc["access_hash"]))
+                elif npc.get("username"):
+                    target_user = npc["username"]
+                
+                if target_user:
+                    await client(AddContactRequest(
+                        id=target_user,
+                        first_name=npc.get("first_name") or "User",
+                        last_name=npc.get("last_name") or "",
+                        phone="", 
+                        add_phone_privacy_exception=False
+                    ))
+                    batch_found += 1
+                    if acc: acc.contact_count += 1
+            except Exception as ex:
+                errors.append({"contact": npc.get("id"), "error": f"Single Add: {str(ex)}"})
+
+        if batch_found > 0:
+            total_processed += batch_found
+            if acc:
+                now_utc = datetime.utcnow()
+                if acc.last_contact_add_date and acc.last_contact_add_date.date() < now_utc.date():
+                    acc.contacts_added_today = 0
+                acc.contacts_added_today += batch_found
+                acc.last_contact_add_date = now_utc
+                await acc.save()
+
         if i + BATCH_SIZE < len(body.contacts):
             await asyncio.sleep(BATCH_DELAY)
 

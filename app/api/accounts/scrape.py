@@ -168,11 +168,19 @@ async def scrape_group_members_stream(
 
                 member_data = {
                     "id": str(member_id),
+                    "access_hash": str(getattr(member, 'access_hash', '')),
                     "first_name": member.first_name or "",
                     "last_name": member.last_name or "",
                     "username": member.username or "",
                     "phone": member.phone or "",
-                    "status_label": status_label
+                    "status_label": status_label,
+                    "is_bot": bool(member.bot),
+                    "is_premium": bool(getattr(member, 'premium', False)),
+                    "is_verified": bool(getattr(member, 'verified', False)),
+                    "is_scam": bool(getattr(member, 'scam', False)),
+                    "is_fake": bool(getattr(member, 'fake', False)),
+                    "has_photo": bool(getattr(member, 'photo', None)),
+                    "restricted": bool(getattr(member, 'restricted', False))
                 }
                 pending_members.append(member_data)
                 
