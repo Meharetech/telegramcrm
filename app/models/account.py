@@ -26,12 +26,19 @@ class TelegramAccount(Document):
     last_check_status: Optional[str] = None
     last_check_time: Optional[datetime] = None
     
+    # Selling Fields
+    is_for_sale: bool = False
+    sale_price: float = 45.0
+    is_sold: bool = False
+    sold_at: Optional[datetime] = None
+
     # Task Tracking (Phase 2)
     active_task_id: Optional[str] = None
     active_task_type: Optional[str] = None # 'member_add', 'campaign', 'scrape'
     
     class AccountShort(BaseModel):
         id: Optional[ObjectId] = Field(None, alias="_id")
+        user_id: str = "legacy_user"
         phone_number: str
         status: str
         device_model: Optional[str]
@@ -48,6 +55,10 @@ class TelegramAccount(Document):
         is_active: bool
         active_task_id: Optional[str]
         active_task_type: Optional[str]
+        is_for_sale: bool = False
+        sale_price: float = 45.0
+        is_sold: bool = False
+        sold_at: Optional[datetime] = None
 
         class Config:
             populate_by_name = True

@@ -360,6 +360,21 @@ async def list_admin_users(
     users = await User.find(query).sort("-created_at").skip(skip).limit(limit).project(User.UserShort).to_list()
     total = await User.find(query).count()
 
+    # Fetch account counts for these users using a proper projection model
+    user_ids = [str(u.id) for u in users]
+    
+    class AccountProjection(BaseModel):
+        user_id: str
+
+    all_user_accounts = await TelegramAccount.find(
+        {"user_id": {"$in": user_ids}}
+    ).project(AccountProjection).to_list()
+    
+    count_map = {}
+    for acc in all_user_accounts:
+        uid = str(acc.user_id)
+        count_map[uid] = count_map.get(uid, 0) + 1
+
     return {
         "total": total,
         "users": [
@@ -376,6 +391,8 @@ async def list_admin_users(
                 "plan_expiry_at": u.plan_expiry_at.isoformat() if u.plan_expiry_at else None,
                 "billing_cycle": u.billing_cycle,
                 "services_active": getattr(u, 'services_active', True),
+                "wallet_balance": getattr(u, 'wallet_balance', 0.0), # Added wallet balance here too
+                "account_count": count_map.get(str(u.id), 0),
                 "disabled_services": getattr(u, 'disabled_services', []),
                 "enabled_services": getattr(u, 'enabled_services', [])
             } for u in users
@@ -500,7 +517,8 @@ async def get_profile(current_user: User = Depends(get_current_user)):
         "created_at": current_user.created_at.isoformat() if current_user.created_at else None,
         "plan": plan_details,
         "plan_expiry_at": current_user.plan_expiry_at.isoformat() if current_user.plan_expiry_at else None,
-        "billing_cycle": current_user.billing_cycle
+        "billing_cycle": current_user.billing_cycle,
+        "wallet_balance": current_user.wallet_balance
     }
 
 @router.get("/settings")
@@ -528,22 +546,23 @@ async def update_settings(req: UserAPISettings, current_user: User = Depends(get
 
 # ── Global Resource Management (Admin Only) ──────────────────────────────────
 
-@router.get("/admin/accounts")
-async def admin_get_all_accounts(current_user: User = Depends(get_current_user)):
+@router.get("/admin/users/{user_id}/accounts")
+async def admin_get_user_accounts(user_id: str, current_user: User = Depends(get_current_user)):
     if not current_user.is_admin:
         raise HTTPException(status_code=403, detail="Forbidden")
     
-    # USE PROJECTION: Admin overview only needs metadata, skip heavy session strings
-    accounts = await TelegramAccount.find_all().project(TelegramAccount.AccountShort).to_list()
-    # Join with user email for better context
-    users = {str(u.id): u.email for u in await User.find_all().to_list()}
+    accounts = await TelegramAccount.find(TelegramAccount.user_id == user_id).project(TelegramAccount.AccountShort).to_list()
+    # No need to join email here as we already know the user from user_id
     
     return [{
         "id": str(a.id),
-        "user_email": users.get(a.user_id, "unknown"),
         "phone_number": a.phone_number,
         "status": a.status,
         "is_active": a.is_active,
+        "is_for_sale": a.is_for_sale,
+        "sale_price": a.sale_price,
+        "is_sold": a.is_sold,
+        "sold_at": a.sold_at.isoformat() if a.sold_at else None,
         "created_at": a.created_at.isoformat() if a.created_at else None
     } for a in accounts]
 

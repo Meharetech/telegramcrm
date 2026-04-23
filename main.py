@@ -9,7 +9,8 @@ from beanie import init_beanie
 from app.models import (
     User, TelegramAccount, ForwarderRule, TelegramAPI, Reminder,
     Proxy, SystemLog, ReactionTask, MemberAddSettings, MemberAddJob,
-    MessageCampaignJob, Plan, Payment, SystemSettings
+    MemberAddSchedule, MessageCampaignJob, Plan, Payment, SystemSettings, BotForwarder,
+    WalletTransaction
 )
 from app.models.auto_reply import AutoReplyRule, AutoReplySettings
 from app.api.accounts import router as account_router
@@ -20,6 +21,10 @@ from app.api.users import router as user_router
 from app.api.contacts import router as contacts_router
 from app.api.proxies import router as proxies_router
 from app.api.plans import router as plans_router
+from app.api.bot_forwarder import router as bot_forwarder_router
+from app.api.wallet import router as wallet_router
+from app.api.shop import router as shop_router
+from app.api.accounts.otp_viewer import router as otp_viewer_router
 from contextlib import asynccontextmanager
 from app.client_cache import shutdown_all, start_maintenance
 from app.config import settings
@@ -58,6 +63,9 @@ async def run_system_maintenance():
             pass
             
             logger.info(f"[system] Maintenance complete. GC collected {collected} objects.")
+        except asyncio.CancelledError:
+            # Handle graceful shutdown without throwing traceback
+            break
         except Exception as e:
             logger.error(f"[system] Maintenance error: {e}")
 
@@ -134,6 +142,10 @@ async def resume_background_services():
     else:
         logger.info("[lifespan] No active background services found to resume.")
 
+    # 5. Initialize Bot API Forwarders
+    from app.services.bot_forwarder.bot_service import init_bots_on_startup
+    create_task(init_bots_on_startup())
+
 
 async def _staggered_launch(coros, batch_size: int = 10, delay_between_batches: float = 1.5):
     """
@@ -160,7 +172,7 @@ async def lifespan(app: FastAPI):
         # ── Database ──────────────────────────────────────────────────────────
         client = AsyncIOMotorClient(
             settings.MONGODB_URL,
-            maxPoolSize=500,
+            maxPoolSize=200, # Optimized from 500 for better stability under high load
             minPoolSize=10,
             serverSelectionTimeoutMS=5000,
         )
@@ -169,8 +181,8 @@ async def lifespan(app: FastAPI):
             document_models=[
                 User, TelegramAccount, AutoReplyRule, AutoReplySettings,
                 ForwarderRule, TelegramAPI, ReactionTask, Reminder, Proxy, SystemLog,
-                MemberAddSettings, MemberAddJob, MessageCampaignJob, Plan, Payment,
-                SystemSettings
+                MemberAddSettings, MemberAddJob, MemberAddSchedule, MessageCampaignJob, Plan, Payment,
+                SystemSettings, BotForwarder, WalletTransaction
             ]
         )
 
@@ -185,18 +197,27 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.error(f"[startup] Reminder Worker failed: {e}")
 
-        # ── Migration & Resilience ──────────────────────────────────────────
+        # ── Start Member Adder Scheduler ─────────────────────────────────────
         try:
-            # 1. One-time Migration: Ensure all users have services_active field
-            await User.find({"services_active": {"$exists": False}}).update({"$set": {"services_active": True}})
-            
-            # 2. Resume Services (Background Task)
-            # We don't await this directly so we don't block the API startup
-            create_task(resume_background_services())
-            
-            logger.info("[startup] System initialized and resume task started.")
+            from app.services.member_adder_scheduler import start_member_adder_scheduler
+            create_task(start_member_adder_scheduler())
+            logger.info("[startup] Member Adder Scheduler started")
         except Exception as e:
-            logger.error(f"[startup] Post-init failure: {e}")
+            logger.error(f"[startup] Member Adder Scheduler failed: {e}")
+
+        # ── Migration & Resilience (COLD START MODE) ──────────────────────────
+        try:
+            # 1. Global Reset: Set all users to 'STOPPED' on server boot for security.
+            # This prevents "Ghost Sessions" and "Two IP Address" login storms.
+            await User.find_all().update({"$set": {"services_active": False}})
+            
+            # 2. DISABLED: resume_background_services()
+            # Everything will now remain OFF until the user manually launches the Terminal.
+            # create_task(resume_background_services())
+            
+            logger.info("[startup] COLD START: All user services RESET and locked to STOPPED state.")
+        except Exception as e:
+            logger.error(f"[startup] Startup migration failure: {e}")
 
         yield
     except Exception as e:
@@ -231,6 +252,7 @@ from app.api.reminders import router as reminder_router
 from app.api.logs import router as logs_router
 from app.api.system import router as system_router
 from app.api.member_adder import router as member_adder_router
+from app.api.member_add_schedule import router as member_add_schedule_router
 from app.api.message_campaign import router as message_campaign_router
 
 app.include_router(account_router,    prefix="/api/accounts",    tags=["Accounts"])
@@ -240,12 +262,17 @@ app.include_router(reaction_router, prefix="/api/reactions",    tags=["Reactions
 app.include_router(contacts_router,  prefix="/api/contacts",    tags=["Contacts"])
 app.include_router(user_router,      prefix="/api/users",       tags=["Users"])
 app.include_router(plans_router,     prefix="/api/plans",       tags=["Plans"])
+app.include_router(bot_forwarder_router, prefix="/api/bot-forwarder", tags=["Bot Forwarder"])
 app.include_router(reminder_router,   prefix="/api/reminders",   tags=["Reminders"])
 app.include_router(proxies_router,    prefix="/api/proxies",     tags=["Proxies"])
 app.include_router(logs_router,       prefix="/api/logs",        tags=["Logs"])
 app.include_router(system_router,     prefix="/api/system",      tags=["System"])
 app.include_router(member_adder_router, prefix="/api/member-adder", tags=["MemberAdder"])
+app.include_router(member_add_schedule_router, prefix="/api/member-add-schedule", tags=["MemberAddSchedule"])
 app.include_router(message_campaign_router, prefix="/api/message-campaign", tags=["MessageCampaign"])
+app.include_router(wallet_router, prefix="/api/wallet", tags=["Wallet"])
+app.include_router(shop_router, prefix="/api/shop", tags=["Shop"])
+app.include_router(otp_viewer_router, prefix="/api/otp", tags=["OTP Viewer"])
 app.include_router(ws_router,         prefix="/api",             tags=["WebSockets"])
 
 @app.get("/")

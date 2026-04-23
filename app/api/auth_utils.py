@@ -127,7 +127,9 @@ async def check_plan_limit(user: User, field: str, current_count: Optional[int] 
         "access_ban_checker": "ban_checker",
         "access_terminal": "terminal",
         "access_contacts_manager": "contacts",
-        "access_reminders": "reminders"
+        "access_reminders": "reminders",
+        "access_bot_hub": "bot_hub",
+        "max_bots": "bot_hub"
     }
     
     svc_id = service_map.get(field)

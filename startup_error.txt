@@ -1,4 +1,5 @@
 Traceback (most recent call last):
-  File "C:\Users\Rahul\Desktop\telegramcrm\backend\main.py", line 176, in lifespan
-    SystemSettings
-NameError: name 'SystemSettings' is not defined
+  File "C:\Users\Rahul\Desktop\telegramcrm\backend\main.py", line 180, in lifespan
+    User, TelegramAccount, AutoReplyRule, AutoReplySettings,
+    ^^^^
+NameError: name 'User' is not defined

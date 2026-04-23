@@ -50,21 +50,40 @@ async def get_account_groups(account_id: str, current_user: User = Depends(get_c
         groups = []
 
         for d in dialogs:
-            if d.is_group or getattr(d.entity, 'megagroup', False):
+            # Check if it's a group or megagroup
+            is_megagroup = getattr(d.entity, 'megagroup', False)
+            is_group = d.is_group or is_megagroup
+            is_channel = getattr(d.entity, 'broadcast', False)
+
+            if is_group or is_channel:
                 # Try getting participant count
                 p_count = getattr(d.entity, 'participants_count', 0)
                 
-                # Default to true, if megagroup we can try to scrape
-                can_scrape = True
+                # Broaden the detection of hidden members
+                # 1. Channels (broadcasts) always hide members from non-admins
+                # 2. Megagroups can have participants_hidden=True
+                # 3. If count is 0 but it's a large group, it might be hidden
                 
+                is_admin = bool(getattr(d.entity, 'admin_rights', None))
+                # For channels, members are ALWAYS hidden unless you are an admin
+                members_hidden = False
+                if is_channel and not is_admin:
+                    members_hidden = True
+                elif is_megagroup:
+                    members_hidden = bool(getattr(d.entity, 'participants_hidden', False) or getattr(d.entity, 'participants_count_hidden', False))
+                
+                # Sometimes Telegram doesn't send the flag in get_dialogs, but if it's a large group 
+                # and we don't have certain properties, it's a hint.
+                # However, participants_hidden is the primary flag.
+
                 groups.append({
                     "id": str(d.id),
                     "name": d.name or "Unknown Group",
                     "participants_count": p_count,
-                    "is_channel": getattr(d.entity, 'broadcast', False),
-                    "is_megagroup": getattr(d.entity, 'megagroup', False),
+                    "is_channel": is_channel,
+                    "is_megagroup": is_megagroup,
                     "is_public": bool(getattr(d.entity, 'username', None)),
-                    "members_hidden": bool(getattr(d.entity, 'participants_hidden', False) or getattr(d.entity, 'participants_count_hidden', False))
+                    "members_hidden": members_hidden
                 })
 
         # Sort by participant count descending

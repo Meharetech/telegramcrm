@@ -23,6 +23,7 @@ class Plan(Document):
     max_auto_replies: int = 0       # -1 = unlimited
     max_reaction_channels: int = 0  # -1 = unlimited
     max_forwarder_channels: int = 0 # -1 = unlimited
+    max_bots: int = 1               # -1 = unlimited
 
     # ── Feature Toggles ─────────────────────────────────────────────────────
     access_chat_message: bool = False      # Bulk/schedule message sending
@@ -35,6 +36,7 @@ class Plan(Document):
     access_contacts_manager: bool = False  # Contacts management
     access_reminders: bool = False         # Scheduled reminders
     access_terminal: bool = False          # Terminal access toggle
+    access_bot_hub: bool = False           # Bot Hub Access
 
     class Settings:
         name = "plans"

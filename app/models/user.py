@@ -20,6 +20,7 @@ class User(Document):
     plan_id: Optional[str] = None  # Reference to Plan._id assigned by admin
     plan_expiry_at: Optional[datetime] = None
     billing_cycle: Optional[str] = None # 'monthly' or 'yearly'
+    wallet_balance: float = 0.0 # User's credit balance
     last_start_at: Optional[datetime] = None
     last_stop_at: Optional[datetime] = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
@@ -35,13 +36,14 @@ class User(Document):
         full_name: Optional[str]
         is_active: bool
         is_admin: bool
-        is_super_admin: bool
-        plan_id: Optional[str]
-        plan_expiry_at: Optional[datetime]
-        billing_cycle: Optional[str]
-        services_active: bool
-        disabled_services: list[str]
-        enabled_services: list[str]
+        is_super_admin: bool = False
+        plan_id: Optional[str] = None
+        plan_expiry_at: Optional[datetime] = None
+        billing_cycle: Optional[str] = None
+        wallet_balance: float = 0.0
+        services_active: bool = True
+        disabled_services: list[str] = []
+        enabled_services: list[str] = []
         created_at: datetime
 
         class Config:

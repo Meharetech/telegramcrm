@@ -79,6 +79,8 @@ class PlanCreate(BaseModel):
     access_contacts_manager: bool = False
     access_reminders: bool = False
     access_terminal: bool = False
+    access_bot_hub: bool = False
+    max_bots: int = 1
 
 
 class PlanUpdate(BaseModel):
@@ -103,6 +105,8 @@ class PlanUpdate(BaseModel):
     access_contacts_manager: Optional[bool] = None
     access_reminders: Optional[bool] = None
     access_terminal: Optional[bool] = None
+    access_bot_hub: Optional[bool] = None
+    max_bots: Optional[int] = None
 
 
 class AssignPlan(BaseModel):
@@ -186,6 +190,8 @@ def plan_to_dict(p: Plan) -> dict:
         "access_contacts_manager": getattr(p, "access_contacts_manager", False),
         "access_reminders": getattr(p, "access_reminders", False),
         "access_terminal": getattr(p, "access_terminal", False),
+        "access_bot_hub": getattr(p, "access_bot_hub", False),
+        "max_bots": getattr(p, "max_bots", 1),
     }
 
 
@@ -477,7 +483,8 @@ async def get_my_plan(current_user: User = Depends(get_current_user)):
             "plan": plan_dict,
             "expiry_at": current_user.plan_expiry_at.isoformat() if current_user.plan_expiry_at else None,
             "purchased_at": purchased_at.isoformat() if purchased_at else None,
-            "is_expired": is_expired
+            "is_expired": is_expired,
+            "services_active": getattr(current_user, "services_active", False)
         }
     except Exception as e:
         print(f"Error in get_my_plan: {e}")

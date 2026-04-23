@@ -422,7 +422,7 @@ async def qr_login_init(req: ConnectRequest, background_tasks: BackgroundTasks, 
         # Start background task to wait for scan
         background_tasks.add_task(wait_for_qr_login, session_id)
         
-        return {"session_id": session_id, "url": qr_login.url}
+        return {"session_id": session_id, "url": qr_login.url, "ttl": 45}
     except Exception as e:
         await client.disconnect()
         raise HTTPException(status_code=400, detail=str(e))
@@ -434,10 +434,13 @@ async def qr_login_status(session_id: str):
     
     data = pending_qr_sessions[session_id]
     
-    # Auto cleanup sessions older than 5 minutes
-    if time.time() - data["created_at"] > 300:
+    # Auto cleanup sessions older than 45 seconds (Telegram QR limit)
+    if time.time() - data["created_at"] > 45:
         if data["status"] == "pending":
-            await data["client"].disconnect()
+            try:
+                await data["client"].disconnect()
+            except:
+                pass
         del pending_qr_sessions[session_id]
         raise HTTPException(status_code=404, detail="Session expired")
     
