@@ -29,3 +29,21 @@ class MessageCampaignJob(Document):
     class Settings:
         name = "message_campaign_jobs"
         indexes = ["user_id", "status", "created_at"]
+
+class MessageCampaignSchedule(Document):
+    user_id: Indexed(str)
+    method: str = "contact"
+    username_list: List[str] = []
+    message_text: str = ""
+    account_configs: List[Dict[str, Any]] = [] # [{ "id": "...", "count": 10 }]
+    min_delay: int = 30
+    max_delay: int = 60
+    
+    scheduled_for: datetime
+    status: str = "pending" # pending, running, completed, error
+    
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+    class Settings:
+        name = "message_campaign_schedules"
+        indexes = ["user_id", "status", "scheduled_for"]

@@ -14,6 +14,13 @@ async def get_recent_logs(limit: int = 100, current_user: User = Depends(get_cur
     # Return in chronological order for terminal
     return logs[::-1]
 
+@router.get("/admin/global")
+async def get_global_logs(limit: int = 5, current_user: User = Depends(get_current_user)):
+    if not current_user.is_admin:
+        return []
+    logs = await SystemLog.find_all().sort(-SystemLog.timestamp).limit(limit).to_list()
+    return logs
+
 @router.delete("/clear")
 async def clear_logs(current_user: User = Depends(get_current_user)):
     await SystemLog.find(SystemLog.user_id == str(current_user.id)).delete()

@@ -17,6 +17,9 @@ class TelegramAccount(Document):
     daily_contacts_limit: int = 200
     contacts_added_today: int = 0
     last_contact_add_date: Optional[datetime] = None
+    daily_messages_limit: int = 20
+    messages_sent_today: int = 0
+    last_message_sent_date: Optional[datetime] = None
     contact_count: int = 0
     unread_count: int = 0  # Global unread messages count
     last_message_at: Optional[datetime] = None # Timestamp of last incoming message
@@ -44,6 +47,8 @@ class TelegramAccount(Document):
         device_model: Optional[str]
         daily_contacts_limit: int
         contacts_added_today: int
+        daily_messages_limit: int = 50
+        messages_sent_today: int = 0
         unread_count: int
         last_message_at: Optional[datetime]
         contact_count: int

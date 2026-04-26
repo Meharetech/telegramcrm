@@ -11,6 +11,8 @@ class MemberAddSchedule(Document):
     # Selected accounts and their per-account counts
     # List of { id: account_id, count: target_count }
     account_configs: List[Dict] = []
+    source_type: str = "contacts" # contacts, custom_list
+    member_list: List[str] = [] # List of usernames/IDs
     
     scheduled_time: str # "HH:MM" format (24h)
     min_delay: int = 30

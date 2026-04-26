@@ -1,12 +1,14 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
+from bson import ObjectId
 from pydantic import BaseModel
 from typing import List, Optional
 from app.api.auth_utils import get_current_user
-from app.models import User, MessageCampaignJob
+from app.models import User, MessageCampaignJob, MessageCampaignSchedule
 from app.services.message_campaign import MESSAGE_CAMPAIGN_TASKS, ActiveMessageCampaign
 import asyncio
 import json
 import uuid
+from datetime import datetime, timezone
 from sse_starlette.sse import EventSourceResponse
 
 router = APIRouter()
@@ -23,6 +25,9 @@ class MessageCampaignRequest(BaseModel):
     min_delay: int = 30
     max_delay: int = 60
 
+class MessageCampaignScheduleRequest(MessageCampaignRequest):
+    scheduled_for: datetime # ISO format string from frontend
+
 @router.post("/start")
 async def start_message_campaign(req: MessageCampaignRequest, current_user: User = Depends(get_current_user)):
     from app.api.auth_utils import check_plan_limit
@@ -34,7 +39,6 @@ async def start_message_campaign(req: MessageCampaignRequest, current_user: User
             raise HTTPException(status_code=400, detail="A message campaign is already running for your account.")
 
     # ── SECURITY FIX: Verify account ownership (IDOR Protection) ────────────────
-    from bson import ObjectId
     from app.models.account import TelegramAccount
     provided_ids = [ObjectId(acc.id) for acc in req.account_configs]
     owned_accounts = await TelegramAccount.find(
@@ -143,3 +147,50 @@ async def get_message_campaign_history(current_user: User = Depends(get_current_
         MessageCampaignJob.user_id == user_id
     ).sort(-MessageCampaignJob.updated_at).limit(20).to_list()
     return jobs
+
+@router.post("/schedule")
+async def schedule_message_campaign(req: MessageCampaignScheduleRequest, current_user: User = Depends(get_current_user)):
+    user_id = str(current_user.id)
+    
+    # Verify account ownership
+    from app.models.account import TelegramAccount
+    provided_ids = [ObjectId(acc.id) for acc in req.account_configs]
+    owned_accounts = await TelegramAccount.find(
+        {"_id": {"$in": provided_ids}, "user_id": user_id}
+    ).to_list()
+    
+    if len(owned_accounts) != len(req.account_configs):
+        raise HTTPException(status_code=403, detail="Account verification failed.")
+
+    schedule = MessageCampaignSchedule(
+        user_id=user_id,
+        method=req.method,
+        username_list=req.username_list,
+        message_text=req.message_text,
+        account_configs=[{"id": acc.id, "count": acc.count} for acc in req.account_configs],
+        min_delay=req.min_delay,
+        max_delay=req.max_delay,
+        scheduled_for=req.scheduled_for.astimezone(timezone.utc),
+        status="pending"
+    )
+    await schedule.insert()
+    return {"status": "success", "message": "Campaign scheduled successfully.", "id": str(schedule.id)}
+
+@router.get("/schedules")
+async def get_scheduled_campaigns(current_user: User = Depends(get_current_user)):
+    user_id = str(current_user.id)
+    schedules = await MessageCampaignSchedule.find(
+        MessageCampaignSchedule.user_id == user_id,
+        MessageCampaignSchedule.status == "pending"
+    ).sort(-MessageCampaignSchedule.scheduled_for).to_list()
+    return schedules
+
+@router.delete("/schedules/{schedule_id}")
+async def delete_scheduled_campaign(schedule_id: str, current_user: User = Depends(get_current_user)):
+    user_id = str(current_user.id)
+    schedule = await MessageCampaignSchedule.get(ObjectId(schedule_id))
+    if not schedule or schedule.user_id != user_id:
+        raise HTTPException(status_code=404, detail="Schedule not found")
+    
+    await schedule.delete()
+    return {"status": "success", "message": "Scheduled campaign deleted."}

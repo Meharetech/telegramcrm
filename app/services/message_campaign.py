@@ -16,6 +16,7 @@ from app.models import TelegramAccount, MessageCampaignJob
 from app.client_cache import get_client
 from app.services.terminal_service import terminal_manager
 from app.config import settings
+from bson import ObjectId
 
 logger = logging.getLogger(__name__)
 
@@ -47,10 +48,11 @@ class ActiveMessageCampaign:
         self.accounts_to_use = []
         self.global_username_queue = list(username_list) if method == 'username' else []
         self._is_syncing = False
+        self.is_scheduled = False  # Set to True when triggered by scheduler
 
     async def add_log(self, event: str, message: str, level: str = "INFO", data: dict = None):
         async with self.lock:
-            ts = datetime.now().strftime("%H:%M:%S")
+            ts = datetime.now().strftime("%I:%M:%S %p")
             log_entry = {
                 "msg": message,
                 "level": level,
@@ -121,7 +123,12 @@ class ActiveMessageCampaign:
             # ── Step 0: User Service Guard ───────────────────────────────────
             from app.models.user import User
             user = await User.get(self.user_id)
-            if not user or not user.services_active:
+            if not user:
+                await self.add_log("error", "🛑 Task Aborted: User not found.", "ERROR")
+                return
+            # Only block if manually launched AND services are stopped.
+            # Scheduled tasks bypass this check.
+            if not self.is_scheduled and not user.services_active:
                 await self.add_log("error", "🛑 Task Aborted: User services are currently STOPPED.", "ERROR")
                 return
 
@@ -182,11 +189,6 @@ class ActiveMessageCampaign:
                         "failed": False,
                         "last_error_msg": ""
                     })
-                    # Lock account
-                    acc.active_task_id = self.job_id
-                    acc.active_task_type = "campaign"
-                    await acc.save()
-                    await self.add_log("log", f"✅ Account {acc.phone_number} ready. Goal: {config.count} messages.", "SUCCESS")
                 except Exception as e:
                     reason = str(e)
                     await self.add_log("log", f"❌ Account {acc.phone_number} error: {reason}", "ERROR")
@@ -199,6 +201,17 @@ class ActiveMessageCampaign:
                 await self.add_log("error", "❌ No accounts available to proceed.", "ERROR")
                 return
 
+            # ── Step 0.5: Batch Lock All Accounts ───────────────────────────
+            acc_ids_to_lock = [ObjectId(a["acc_id"]) for a in self.accounts_to_use]
+            await TelegramAccount.find({"_id": {"$in": acc_ids_to_lock}}).update({
+                "$set": {
+                    "active_task_id": self.job_id,
+                    "active_task_type": "campaign"
+                }
+            })
+            for a in self.accounts_to_use:
+                await self.add_log("log", f"✅ Account {a['phone']} ready. Goal: {a['target_count']} messages.", "SUCCESS")
+
             if self.method == 'username':
                 self.total_targets = min(len(self.username_list), sum(a["target_count"] for a in self.accounts_to_use))
             else:
@@ -206,22 +219,42 @@ class ActiveMessageCampaign:
 
             await self.add_log("status", f"📂 Campaign target: {self.total_targets} users. Starting rotation...", data={"total": self.total_targets})
 
-            # ── Optimized Async Rotation Loop (Non-Blocking) ─────────────────
+            # ── Optimized Async Rotation Loop (Sequential & Distributed) ─────
             import time
+            import re
+            import random
             from app.client_cache import is_user_active
+
+            def parse_spintax(text):
+                pattern = re.compile(r'\{([^{}]*)\}')
+                while True:
+                    match = pattern.search(text)
+                    if not match: break
+                    choices = match.group(1).split('|')
+                    text = text.replace(match.group(0), random.choice(choices), 1)
+                return text
             
             for acc in self.accounts_to_use:
                 acc["next_work_at"] = 0
 
+            # Safety for delay values
+            min_d = min(self.min_delay, self.max_delay)
+            max_d = max(self.min_delay, self.max_delay)
+            if min_d == max_d: max_d += 1
+
+            any_working = True
             while self.done_count < self.total_targets and not self.stop_requested:
-                any_ready = False
-                any_working = False
-                
-                # Check User Service Guard (Real-time)
-                if not await is_user_active(self.user_id):
+                # Check User Service Guard (Real-time) — skip for scheduled tasks
+                if not self.is_scheduled and not await is_user_active(self.user_id):
                     await self.add_log("error", "🛑 Task Aborted: User services were STOPPED by administrator.", "ERROR")
                     self.stop_requested = True
                     break
+
+                any_working = False
+                found_ready = False
+                
+                # Sort accounts by next_work_at to always pick the one that has waited longest
+                self.accounts_to_use.sort(key=lambda x: x.get("next_work_at", 0))
 
                 for acc_task in self.accounts_to_use:
                     if self.stop_requested: break
@@ -231,13 +264,13 @@ class ActiveMessageCampaign:
                     any_working = True
                     now = time.time()
                     if now < acc_task["next_work_at"]:
-                        continue # Cooling down
+                        continue # Still cooling down
                         
-                    any_ready = True
+                    found_ready = True
 
                     # ── Safety Check: Re-verify Daily Limit ───────────────────
                     db_acc = acc_task["db_acc"]
-                    if db_acc.contacts_added_today >= db_acc.daily_contacts_limit:
+                    if db_acc.messages_sent_today >= db_acc.daily_messages_limit:
                         acc_task["failed"] = True
                         await self.add_log("log", f"⚠️ {acc_task['phone']} hit daily limit mid-task. Retired.", "WARNING")
                         continue
@@ -248,9 +281,7 @@ class ActiveMessageCampaign:
                         if self.global_username_queue:
                             target = self.global_username_queue.pop(0)
                         else:
-                            # Queue empty, this account is done but other methods might still run?
-                            # For username method, once global queue is empty, everyone is done.
-                            self.total_targets = self.done_count # Adjust total to match what we actually found
+                            self.total_targets = self.done_count 
                             break 
                     elif self.method == 'contact':
                         if acc_task["targets"]:
@@ -261,17 +292,6 @@ class ActiveMessageCampaign:
                     
                     if not target: continue
                     
-                    # ── Spintax Support (Randomization) ──────────────────────
-                    import re
-                    def parse_spintax(text):
-                        pattern = re.compile(r'\{([^{}]*)\}')
-                        while True:
-                            match = pattern.search(text)
-                            if not match: break
-                            choices = match.group(1).split('|')
-                            text = text.replace(match.group(0), random.choice(choices), 1)
-                        return text
-
                     message_to_send = parse_spintax(self.message_text)
                     await self.add_log("log", f"⏳ {acc_task['phone']} sending to {target}...", "INFO")
                     
@@ -282,13 +302,25 @@ class ActiveMessageCampaign:
                         self.done_count += 1
                         acc_task["this_task_done"] += 1
                         
-                        # Update DB counters
-                        db_acc.contacts_added_today += 1
-                        db_acc.last_contact_add_date = datetime.now(timezone.utc)
-                        await db_acc.save()
+                        # Update DB counters using partial update ($inc/$set) for high performance
+                        await TelegramAccount.find_one({"_id": db_acc.id}).update({
+                            "$inc": {"messages_sent_today": 1},
+                            "$set": {"last_message_sent_date": datetime.now(timezone.utc)}
+                        })
+                        db_acc.messages_sent_today += 1 # Sync local object
 
-                        await self.add_log("progress", f"✅ {acc_task['phone']} sent to {target}", "SUCCESS", data={"done": self.done_count})
-                        await terminal_manager.log_event(self.user_id, f"✅ {acc_task['phone']} messaged {target}", acc_task["acc_id"], "msg_campaign", "SUCCESS")
+                        # Per-step cooldown
+                        delay = random.randint(min_d, max_d)
+                        acc_task["next_work_at"] = time.time() + delay
+                        
+                        pending = self.total_targets - self.done_count
+                        await self.add_log("progress", f"✅ {acc_task['phone']} sent to {target} (Pending: {pending})", "SUCCESS", data={
+                            "done": self.done_count,
+                            "pending": pending,
+                            "total": self.total_targets,
+                            "next_delay": delay
+                        })
+                        await terminal_manager.log_event(self.user_id, f"✅ {acc_task['phone']} messaged {target} (Pending: {pending})", acc_task["acc_id"], "msg_campaign", "SUCCESS")
                     
                     # ── Telegram Error Resilience ─────────────────────────────
                     except FloodWaitError as e:
@@ -301,7 +333,7 @@ class ActiveMessageCampaign:
                         else:
                             await self.add_log("log", f"⏳ Short FloodWait ({e.seconds}s) for {acc_task['phone']}. Cooling down.", "WARNING")
                             acc_task["next_work_at"] = time.time() + e.seconds
-                            continue # Account will wait
+                            continue 
                     except PeerFloodError:
                         acc_task["failed"] = True
                         acc_task["last_error_msg"] = "PeerFlood (Spam Warning)"
@@ -315,35 +347,47 @@ class ActiveMessageCampaign:
                         await db_acc.save()
                         await self.add_log("log", f"❌ {acc_task['phone']} is banned/expired.", "ERROR")
                     except RPCError as e:
-                        self.errors_count += 1
+                        err_str = str(e)
+                        if any(x in err_str for x in ["CHAT_MEMBER_ADD_FAILED", "PEER_FLOOD", "USER_BANNED_IN_CHANNEL"]):
+                            acc_task["failed"] = True
+                            acc_task["last_error_msg"] = "Limit Hit (24h)"
+                            db_acc.flood_wait_until = datetime.now(timezone.utc) + timedelta(hours=24)
+                            await db_acc.save()
+                            await self.add_log("log", f"🔴 {acc_task['phone']}: Critical Error ({err_str}). Account stopped for 24h.", "ERROR")
+                        else:
+                            self.errors_count += 1
+                            await self.add_log("log", f"❌ RPC Error: {err_str}", "ERROR")
                         acc_task["last_error_msg"] = str(e)
                         await self.add_log("log", f"❌ Error: {str(e)}", "ERROR")
                         if "privacy" in str(e).lower():
-                            acc_task["next_work_at"] = time.time() + 60 # Penalty for privacy errors
+                            acc_task["next_work_at"] = time.time() + 60 
                     except Exception as e:
                         self.errors_count += 1
                         await self.add_log("log", f"❌ Unexpected Error: {str(e)}", "ERROR")
 
                     # Per-step cooldown
-                    delay = random.randint(self.min_delay, self.max_delay)
+                    delay = random.randint(min_d, max_d)
                     acc_task["next_work_at"] = time.time() + delay
                     
-                    # Small throttle between accounts
-                    await asyncio.sleep(0.3)
+                    await self.add_log("log", f"💤 {acc_task['phone']} waiting for {delay}s...", "INFO", data={"next_delay": delay})
+                    
+                    # BREAK after processing ONE account to ensure the next loop iteration 
+                    # picks the next available account in rotation (after sorting)
+                    break
 
                 if not any_working:
                     break
 
-                if not any_ready:
-                    # Wait for next available account
-                    await asyncio.sleep(1)
+                if not found_ready:
+                    # Optimized sleep to yield control in high-concurrency environments
+                    await asyncio.sleep(0.5) 
 
             # ── Final Report ──────────────────────────────────────────────────
             status_event = "done"
             msg = f"🏁 Campaign Finished. Total: {self.done_count}/{self.total_targets} sent."
             if self.stop_requested:
                 msg = f"🛑 Campaign Stopped by User. Final: {self.done_count} sent."
-            elif not any_left and self.method == 'username' and self.global_username_queue:
+            elif not any_working and self.method == 'username' and self.global_username_queue:
                 msg = f"⚠️ Campaign Finished prematurely: Accounts hit limits before queue was cleared."
             
             await self.add_log(status_event, msg, "SUCCESS" if self.done_count >= self.total_targets else "WARNING")
@@ -355,9 +399,11 @@ class ActiveMessageCampaign:
             self.is_done = True
             self.status = "completed" if not self.stop_requested else "stopped"
             
-            # Unlock accounts
+            # Ensure final state is saved to DB before exiting
+            await self.sync_state()
+            
+            # Unlock accounts in batch
             try:
-                from bson import ObjectId
                 acc_ids = [ObjectId(a["acc_id"]) for a in self.accounts_to_use]
                 await TelegramAccount.find({"_id": {"$in": acc_ids}}).update({"$set": {"active_task_id": None, "active_task_type": None}})
             except: pass

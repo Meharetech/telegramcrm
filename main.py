@@ -1,4 +1,5 @@
 import asyncio
+
 from datetime import datetime, timezone, timedelta
 from asyncio import create_task
 from fastapi import FastAPI
@@ -6,11 +7,12 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from beanie import init_beanie
+from app.models.message_campaign import MessageCampaignJob, MessageCampaignSchedule
 from app.models import (
     User, TelegramAccount, ForwarderRule, TelegramAPI, Reminder,
     Proxy, SystemLog, ReactionTask, MemberAddSettings, MemberAddJob,
-    MemberAddSchedule, MessageCampaignJob, Plan, Payment, SystemSettings, BotForwarder,
-    WalletTransaction
+    MemberAddSchedule, Plan, Payment, SystemSettings, BotForwarder,
+    WalletTransaction, ShopPurchase
 )
 from app.models.auto_reply import AutoReplyRule, AutoReplySettings
 from app.api.accounts import router as account_router
@@ -113,6 +115,9 @@ async def resume_background_services():
                 max_delay=job.max_delay
             )
             task.job_id = str(job.id)
+            task.source_type = job.source_type or "contacts"
+            task.member_list = job.member_list or []
+            
             MEMBER_ADDER_TASKS[job.user_id] = task
             asyncio.create_task(task.run())
 
@@ -181,8 +186,8 @@ async def lifespan(app: FastAPI):
             document_models=[
                 User, TelegramAccount, AutoReplyRule, AutoReplySettings,
                 ForwarderRule, TelegramAPI, ReactionTask, Reminder, Proxy, SystemLog,
-                MemberAddSettings, MemberAddJob, MemberAddSchedule, MessageCampaignJob, Plan, Payment,
-                SystemSettings, BotForwarder, WalletTransaction
+                MemberAddSettings, MemberAddJob, MemberAddSchedule, MessageCampaignJob, MessageCampaignSchedule, Plan, Payment,
+                SystemSettings, BotForwarder, WalletTransaction, ShopPurchase
             ]
         )
 
@@ -204,6 +209,14 @@ async def lifespan(app: FastAPI):
             logger.info("[startup] Member Adder Scheduler started")
         except Exception as e:
             logger.error(f"[startup] Member Adder Scheduler failed: {e}")
+
+        # ── Start Message Campaign Scheduler ───────────────────────────────
+        try:
+            from app.services.message_campaign_scheduler import start_message_campaign_scheduler
+            create_task(start_message_campaign_scheduler())
+            logger.info("[startup] Message Campaign Scheduler started")
+        except Exception as e:
+            logger.error(f"[startup] Message Campaign Scheduler failed: {e}")
 
         # ── Migration & Resilience (COLD START MODE) ──────────────────────────
         try:

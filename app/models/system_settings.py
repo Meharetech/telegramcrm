@@ -31,5 +31,9 @@ class SystemSettings(Document):
     manual_gateways: List[ManualGateway] = []
     crypto_gateways: List[CryptoGateway] = []
 
+    # Shop Settings
+    shop_account_price: float = 45.0
+    shop_otp_timeout_mins: int = 3
+
     class Settings:
         name = "system_settings"

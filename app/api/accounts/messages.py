@@ -18,14 +18,12 @@ from app.client_cache import get_client, invalidate
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-async def extract_message_data(m):
+async def extract_message_data(m, read_outbox_max_id=0):
     """Parses a Telethon Message object into a serializable dictionary."""
     sender_name = "Unknown"
     try:
-        # Note: get_sender is usually cached by Telethon if the message was part of a get_messages call
         sender = await m.get_sender()
         if sender:
-            # Handle both User and Channel/Chat senders
             sender_name = getattr(sender, 'first_name', '') or getattr(sender, 'title', 'Unknown')
             if getattr(sender, 'last_name', None):
                 sender_name += f" {sender.last_name}"
@@ -62,7 +60,6 @@ async def extract_message_data(m):
                 media_type = "document"
 
     text = m.text or ""
-    # If no text but has media, provide a fallback type
     if not text and media_type is None and m.media:
         media_type = "document"
 
@@ -78,6 +75,16 @@ async def extract_message_data(m):
                     "chosen": bool(is_chosen)
                 })
 
+    # Determine status: sent (1 tick) or read (2 ticks)
+    status = "sent"
+    if m.out:
+        # In Telegram 1-on-1, it's either sent (1 tick) or read (2 ticks)
+        # We compare message ID with the recipient's read outbox max ID
+        if read_outbox_max_id > 0 and m.id <= read_outbox_max_id:
+            status = "read"
+        else:
+            status = "sent"
+
     return {
         "id":          m.id,
         "text":        text,
@@ -88,7 +95,8 @@ async def extract_message_data(m):
         "file_name":   file_name,
         "file_size":   file_size,
         "reactions":   reactions_data,
-        "is_edited":   bool(getattr(m, 'edit_date', None))
+        "is_edited":   bool(getattr(m, 'edit_date', None)),
+        "status":      status
     }
 
 @router.get("/messages/{account_id}/{chat_id}")
@@ -101,12 +109,23 @@ async def get_messages(account_id: str, chat_id: str, limit: int = 50, offset_id
 
     try:
         search_id = int(chat_id) if chat_id.lstrip('-').isdigit() else chat_id
+        
+        # More robust way to get read status: Get the dialog for this peer
+        read_outbox_max_id = 0
+        try:
+            # Fetch dialogs to find the read_outbox_max_id for this specific chat
+            async for dialog in client.iter_dialogs():
+                if dialog.id == search_id:
+                    read_outbox_max_id = dialog.dialog.read_outbox_max_id
+                    break
+        except Exception as e:
+            logger.warning(f"Could not fetch read status for {chat_id}: {e}")
+
         history = await client.get_messages(search_id, limit=limit, offset_id=offset_id)
 
-        # Batch resolution happens automatically in extraction if cache is warm
         messages = []
         for m in history:
-            messages.append(await extract_message_data(m))
+            messages.append(await extract_message_data(m, read_outbox_max_id))
 
         return messages
     except Exception as e:

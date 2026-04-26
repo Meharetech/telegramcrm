@@ -64,6 +64,9 @@ async def check_and_trigger_schedules():
                 min_delay=schedule.min_delay,
                 max_delay=schedule.max_delay
             )
+            task.source_type = schedule.source_type or "contacts"
+            task.member_list = schedule.member_list or []
+
             MEMBER_ADDER_TASKS[user_id] = task
             asyncio.create_task(task.run())
             

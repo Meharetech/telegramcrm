@@ -10,6 +10,8 @@ class MemberAddJob(Document):
     done_count: int = 0
     total_count: int = 0
     errors_count: int = 0
+    source_type: str = "contacts" # contacts, custom_list
+    member_list: List[str] = [] # List of usernames/IDs
     
     # Store the account-specific progress/configs
     # Config for reconstruction

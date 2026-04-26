@@ -251,8 +251,8 @@ async def get_admin_stats(current_user: User = Depends(get_current_user)):
         "new_users_today": new_users_today,
         "active_services_users": active_services_users,
         "daily_revenue": daily_revenue,
-        "system_health": "99.9%",
-        "uptime_days": 42
+        "system_health": "100%",
+        "uptime_days": 1
     }
 
 @router.get("/admin/service-usage")

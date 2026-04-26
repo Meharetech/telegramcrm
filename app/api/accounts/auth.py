@@ -523,12 +523,18 @@ async def get_dashboard_stats(current_user: User = Depends(get_current_user)):
         user_id_str = str(current_user.id)
         total = await TelegramAccount.find(TelegramAccount.user_id == user_id_str).count()
         online = await TelegramAccount.find(TelegramAccount.user_id == user_id_str, TelegramAccount.status == "online").count()
+        
+        # Calculate health %
+        health = "100%"
+        if total > 0:
+            health = f"{int((online / total) * 100)}%"
+            
         # In a real app, these would come from more complex aggregations
         return {
             "total_accounts": total,
             "active_sessions": online,
-            "messages_sent": "14.2k",
-            "account_health": "100%"
+            "messages_sent": "---", # Placeholder for actual message tracking
+            "account_health": health
         }
     except Exception as e:
         print(f"[dashboard-stats] Error: {e}")

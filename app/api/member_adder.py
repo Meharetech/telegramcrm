@@ -2,7 +2,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from typing import List, Optional
 from app.api.auth_utils import get_current_user
-from app.models import User, MemberAddSettings
+from app.models import User, MemberAddSettings, TelegramAccount
+from bson import ObjectId
 from app.services.member_adder import MEMBER_ADDER_TASKS, ActiveMemberAdder
 import asyncio
 import json

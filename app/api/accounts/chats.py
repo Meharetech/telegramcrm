@@ -119,7 +119,7 @@ async def get_unread_counts(account_id: str):
 
         if not await client.is_user_authorized():
             await invalidate(account_id)
-            raise HTTPException(status_code=401, detail="Unauthorized")
+            raise HTTPException(status_code=403, detail="Telegram account session is unauthorized or expired.")
 
         dialogs = await client.get_dialogs(limit=50)
         
