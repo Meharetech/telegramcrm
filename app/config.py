@@ -39,6 +39,7 @@ class Settings(BaseSettings):
     SMTP_USER: str = ""
     SMTP_PASS: str = ""
     SMTP_FROM: str = ""
+    ADMIN_EMAIL: str = "" # Email to receive payment notifications
 
     @field_validator("DEFAULT_API_ID", mode="before")
     @classmethod

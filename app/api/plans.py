@@ -10,9 +10,10 @@ from datetime import datetime, timezone, timedelta
 from typing import Optional
 from bson import ObjectId
 
-from app.models import User, Plan, Payment, SystemSettings
+from app.models import User, Plan, Payment, SystemSettings, WalletTransaction
 from app.api.auth_utils import get_current_user
 from app.config import settings
+from app.services.email_service import send_payment_notification_to_admin
 
 router = APIRouter()
 
@@ -162,6 +163,13 @@ class AdminVerifyPaymentReq(BaseModel):
     status: str # "success" or "rejected"
     admin_note: Optional[str] = None
 
+class InitiateWalletTopupReq(BaseModel):
+    amount: float
+    gateway: str
+    sub_gateway: str
+    transaction_ref: str
+    proof_image_url: Optional[str] = None
+
 
 # ── Helper ────────────────────────────────────────────────────────────────────
 
@@ -221,12 +229,12 @@ async def get_gateway_settings(current_user: User = Depends(get_current_user)):
     if not current_user.is_admin:
         raise HTTPException(status_code=403, detail="Forbidden")
     
-    settings = await SystemSettings.find_one()
-    if not settings:
-        settings = SystemSettings()
-        await settings.insert()
+    settings_db = await SystemSettings.find_one()
+    if not settings_db:
+        settings_db = SystemSettings()
+        await settings_db.insert()
     
-    return settings
+    return settings_db
 
 
 @router.put("/admin/gateway-settings")
@@ -234,14 +242,14 @@ async def update_gateway_settings(req: SystemSettingsSchema, current_user: User 
     if not current_user.is_admin:
         raise HTTPException(status_code=403, detail="Forbidden")
     
-    settings = await SystemSettings.find_one()
-    if not settings:
-        settings = SystemSettings(**req.model_dump())
-        await settings.insert()
+    settings_db = await SystemSettings.find_one()
+    if not settings_db:
+        settings_db = SystemSettings(**req.model_dump())
+        await settings_db.insert()
     else:
         for field, value in req.model_dump().items():
-            setattr(settings, field, value)
-        await settings.save()
+            setattr(settings_db, field, value)
+        await settings_db.save()
     
     # Broadcast update to all connected clients (e.g. users on /plans)
     try:
@@ -250,7 +258,7 @@ async def update_gateway_settings(req: SystemSettingsSchema, current_user: User 
     except Exception as e:
         print(f"WS Broadcast error: {e}")
     
-    return settings
+    return settings_db
 
 
 @router.get("/admin/pending-payments")
@@ -364,13 +372,29 @@ async def verify_payment_admin(payment_id: str, req: AdminVerifyPaymentReq, curr
     if req.status == "success":
         user = await User.get(ObjectId(payment.user_id))
         if user:
-            days = 365 if payment.billing_cycle == "yearly" else 30
-            expiry = datetime.now(timezone.utc) + timedelta(days=days)
-            
-            user.plan_id = payment.plan_id
-            user.plan_expiry_at = expiry
-            user.billing_cycle = payment.billing_cycle
-            await user.save()
+            if payment.plan_id == "wallet_topup":
+                # Handle Wallet Topup Approval
+                user.wallet_balance += payment.amount
+                await user.save()
+                
+                # Create Wallet Transaction Log
+                txn = WalletTransaction(
+                    user_id=str(user.id),
+                    amount=payment.amount,
+                    type="credit",
+                    description=f"Wallet Top-up via {payment.sub_gateway or payment.gateway}",
+                    created_at=datetime.now(timezone.utc)
+                )
+                await txn.insert()
+            else:
+                # Handle Plan Assignment
+                days = 365 if payment.billing_cycle == "yearly" else 30
+                expiry = datetime.now(timezone.utc) + timedelta(days=days)
+                
+                user.plan_id = payment.plan_id
+                user.plan_expiry_at = expiry
+                user.billing_cycle = payment.billing_cycle
+                await user.save()
             
     return {"message": f"Payment {req.status} successful"}
 
@@ -502,8 +526,8 @@ async def create_razorpay_order(req: CreateOrderReq, current_user: User = Depend
     if not plan.is_active:
         raise HTTPException(status_code=400, detail="Plan is not active")
 
-    settings = await SystemSettings.find_one()
-    if settings and not settings.razorpay_enabled:
+    settings_db = await SystemSettings.find_one()
+    if settings_db and not settings_db.razorpay_enabled:
         raise HTTPException(status_code=400, detail="Razorpay is currently disabled")
 
     price = plan.price_yearly_inr if req.billing_cycle == "yearly" else plan.price_inr
@@ -512,8 +536,8 @@ async def create_razorpay_order(req: CreateOrderReq, current_user: User = Depend
 
     try:
         client = get_razorpay(
-            key_id=settings.razorpay_key_id if settings else None,
-            key_secret=settings.razorpay_key_secret if settings else None
+            key_id=settings_db.razorpay_key_id if settings_db else None,
+            key_secret=settings_db.razorpay_key_secret if settings_db else None
         )
         amount_paise = int(price * 100)  # Razorpay works in paise
         order = client.order.create({
@@ -532,7 +556,7 @@ async def create_razorpay_order(req: CreateOrderReq, current_user: User = Depend
             "order_id": order["id"],
             "amount": order["amount"],
             "currency": order["currency"],
-            "key_id": settings.razorpay_key_id if settings else getattr(settings, 'RAZORPAY_KEY_ID', None),
+            "key_id": settings_db.razorpay_key_id if settings_db else getattr(settings, 'RAZORPAY_KEY_ID', None),
             "plan_name": f"{plan.name} ({req.billing_cycle.capitalize()})",
             "user_email": current_user.email,
             "user_name": getattr(current_user, "full_name", "") or current_user.email,
@@ -609,12 +633,23 @@ async def verify_razorpay_payment(req: VerifyPaymentReq, current_user: User = De
         user_phone=current_user.phone,
         plan_id=trusted_plan_id,
         plan_name=f"{plan.name} ({trusted_billing_cycle})",
-        amount=actual_price, # Fixed: renamed to amount
+        amount=actual_price,
         razorpay_order_id=req.razorpay_order_id,
         razorpay_payment_id=req.razorpay_payment_id,
         status="success"
     )
     await payment.insert()
+
+    # Notify Admin
+    try:
+        send_payment_notification_to_admin(
+            user_email=current_user.email,
+            amount=actual_price,
+            method="Razorpay",
+            target=f"Plan: {plan.name}",
+            ref=req.razorpay_payment_id
+        )
+    except: pass
 
     return {
         "success": True,
@@ -627,18 +662,18 @@ async def verify_razorpay_payment(req: VerifyPaymentReq, current_user: User = De
 @router.get("/gateways")
 async def get_active_gateways(current_user: User = Depends(get_current_user)):
     """Returns all active payment gateways and their details."""
-    settings = await SystemSettings.find_one()
-    if not settings:
+    settings_db = await SystemSettings.find_one()
+    if not settings_db:
         # Create default settings if not exists
-        settings = SystemSettings()
-        await settings.insert()
+        settings_db = SystemSettings()
+        await settings_db.insert()
     
     return {
-        "razorpay_enabled": settings.razorpay_enabled,
-        "manual_payment_enabled": settings.manual_payment_enabled,
-        "crypto_payment_enabled": settings.crypto_payment_enabled,
-        "manual_gateways": [g for g in settings.manual_gateways if g.is_active] if settings.manual_payment_enabled else [],
-        "crypto_gateways": [g for g in settings.crypto_gateways if g.is_active] if settings.crypto_payment_enabled else [],
+        "razorpay_enabled": settings_db.razorpay_enabled,
+        "manual_payment_enabled": settings_db.manual_payment_enabled,
+        "crypto_payment_enabled": settings_db.crypto_payment_enabled,
+        "manual_gateways": [g for g in settings_db.manual_gateways if g.is_active] if settings_db.manual_payment_enabled else [],
+        "crypto_gateways": [g for g in settings_db.crypto_gateways if g.is_active] if settings_db.crypto_payment_enabled else [],
     }
 
 @router.post("/initiate-manual")
@@ -656,22 +691,22 @@ async def initiate_manual_payment(
     if not plan:
         raise HTTPException(status_code=404, detail="Plan not found")
     
-    settings = await SystemSettings.find_one()
-    if gateway == "manual" and (not settings or not settings.manual_payment_enabled):
+    settings_db = await SystemSettings.find_one()
+    if gateway == "manual" and (not settings_db or not settings_db.manual_payment_enabled):
         raise HTTPException(status_code=400, detail="Manual payments are disabled")
-    if gateway == "crypto" and (not settings or not settings.crypto_payment_enabled):
+    if gateway == "crypto" and (not settings_db or not settings_db.crypto_payment_enabled):
         raise HTTPException(status_code=400, detail="Crypto payments are disabled")
 
     # 1. Prevent Duplicate Submissions (Ref ID check)
     existing = await Payment.find_one(Payment.transaction_ref == transaction_ref)
     if existing:
-        raise HTTPException(status_code=400, detail="This transaction ID has already been submitted. Please make a new payment and submit a new ID.")
+        raise HTTPException(status_code=400, detail="This transaction ID has already been submitted.")
 
     # 1. Validate File Type
     allowed = ['.jpg', '.jpeg', '.png', '.webp']
     ext = os.path.splitext(file.filename)[1].lower()
     if ext not in allowed:
-        raise HTTPException(status_code=400, detail="Invalid proof file. Please upload a JPG, PNG, or WEBP image.")
+        raise HTTPException(status_code=400, detail="Invalid proof file.")
 
     # 2. Save proof image
     os.makedirs("uploads/proofs", exist_ok=True)
@@ -681,7 +716,6 @@ async def initiate_manual_payment(
         shutil.copyfileobj(file.file, buffer)
     
     proof_url = f"uploads/proofs/{safe_name}"
-
     price = plan.price_yearly_inr if billing_cycle == "yearly" else plan.price_inr
     
     payment = Payment(
@@ -695,12 +729,75 @@ async def initiate_manual_payment(
         sub_gateway=sub_gateway,
         status="pending",
         transaction_ref=transaction_ref,
-        proof_image_url=proof_url, # Now stores the local server URL
+        proof_image_url=proof_url,
         billing_cycle=billing_cycle
     )
     await payment.insert()
     
-    return {"message": "Payment submitted for verification. Admin will review it shortly.", "payment_id": str(payment.id)}
+    # Notify Admin
+    try:
+        send_payment_notification_to_admin(
+            user_email=current_user.email,
+            amount=price,
+            method=f"{gateway.upper()} ({sub_gateway})",
+            target=f"Plan: {plan.name}",
+            ref=transaction_ref
+        )
+    except: pass
+
+    return {"message": "Payment submitted!", "payment_id": str(payment.id)}
+
+
+@router.post("/initiate-wallet-topup")
+async def initiate_wallet_topup(
+    amount: float = Form(...),
+    gateway: str = Form(...),
+    sub_gateway: str = Form(...),
+    transaction_ref: str = Form(...),
+    file: UploadFile = File(...),
+    current_user: User = Depends(get_current_user)
+):
+    """User submits a wallet top-up request with payment proof."""
+    # 1. Prevent Duplicate Ref IDs
+    existing = await Payment.find_one(Payment.transaction_ref == transaction_ref)
+    if existing:
+        raise HTTPException(status_code=400, detail="Transaction ID already exists.")
+
+    # 2. Save proof image
+    ext = os.path.splitext(file.filename)[1].lower()
+    os.makedirs("uploads/proofs", exist_ok=True)
+    safe_name = f"wallet_{int(datetime.now().timestamp())}_{ObjectId()}{ext}"
+    file_path = f"uploads/proofs/{safe_name}"
+    with open(file_path, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+    
+    payment = Payment(
+        user_id=str(current_user.id),
+        user_email=current_user.email,
+        user_phone=current_user.phone,
+        plan_id="wallet_topup",
+        plan_name="Wallet Top-up",
+        amount=amount,
+        gateway=gateway,
+        sub_gateway=sub_gateway,
+        status="pending",
+        transaction_ref=transaction_ref,
+        proof_image_url=f"uploads/proofs/{safe_name}"
+    )
+    await payment.insert()
+
+    # Notify Admin
+    try:
+        send_payment_notification_to_admin(
+            user_email=current_user.email,
+            amount=amount,
+            method=f"{gateway.upper()} ({sub_gateway})",
+            target="Wallet Top-up",
+            ref=transaction_ref
+        )
+    except: pass
+
+    return {"message": "Deposit request submitted!", "payment_id": str(payment.id)}
 
 
 @router.get("/my-payments")
@@ -717,8 +814,3 @@ async def get_my_payments(current_user: User = Depends(get_current_user)):
         "date": p.created_at.isoformat(),
         "payment_id": p.razorpay_payment_id or p.transaction_ref
     } for p in payments]
-
-
-# ── Admin Gateway & Payment Management ────────────────────────────────────────
-
-# (Redundant routes moved up)

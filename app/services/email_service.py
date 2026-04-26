@@ -100,3 +100,59 @@ def send_registration_otp_email(to_email: str, otp: str):
     except Exception as e:
         logging.error(f"Failed to send registration email: {e}")
         return False
+
+def send_payment_notification_to_admin(user_email: str, amount: float, method: str, target: str, ref: str):
+    """
+    Sends a high-priority notification to the admin about a new payment submission.
+    """
+    if not settings.SMTP_USER or not settings.SMTP_PASS or not settings.ADMIN_EMAIL:
+        logging.warning("SMTP or Admin Email not set. Payment notification skipped.")
+        return False
+
+    msg = MIMEMultipart()
+    msg['From'] = settings.SMTP_FROM or settings.SMTP_USER
+    msg['To'] = settings.ADMIN_EMAIL
+    msg['Subject'] = f"🚨 NEW PAYMENT: ₹{amount} from {user_email}"
+
+    body = f"""
+    <html>
+    <body style="font-family: 'Segoe UI', sans-serif; padding: 20px; background-color: #fff;">
+        <div style="max-width: 600px; border: 1px solid #eee; border-radius: 15px; overflow: hidden; box-shadow: 0 5px 15px rgba(0,0,0,0.05);">
+            <div style="background: #a855f7; padding: 20px; text-align: center;">
+                <h2 style="color: white; margin: 0;">New Payment Submission</h2>
+            </div>
+            <div style="padding: 30px; line-height: 1.6;">
+                <p>Hello Admin,</p>
+                <p>A user has just submitted a payment for verification on <b>TelegramCrmAi</b>.</p>
+                
+                <div style="background: #f9fafb; border-radius: 10px; padding: 20px; margin: 20px 0;">
+                    <table style="width: 100%; border-collapse: collapse;">
+                        <tr><td style="padding: 8px 0; color: #666;">User Email:</td><td style="padding: 8px 0; font-weight: bold;">{user_email}</td></tr>
+                        <tr><td style="padding: 8px 0; color: #666;">Amount:</td><td style="padding: 8px 0; font-weight: bold; color: #10b981;">₹{amount}</td></tr>
+                        <tr><td style="padding: 8px 0; color: #666;">Method:</td><td style="padding: 8px 0; font-weight: bold;">{method}</td></tr>
+                        <tr><td style="padding: 8px 0; color: #666;">Item/Plan:</td><td style="padding: 8px 0; font-weight: bold;">{target}</td></tr>
+                        <tr><td style="padding: 8px 0; color: #666;">Ref ID:</td><td style="padding: 8px 0; font-weight: bold; font-family: monospace;">{ref}</td></tr>
+                    </table>
+                </div>
+
+                <p>Please log in to the <b>Admin Panel > Approvals</b> to verify the proof and approve the transaction.</p>
+                <br/>
+                <p style="font-size: 12px; color: #aaa;">Sent automatically by TelegramCrmAi System.</p>
+            </div>
+        </div>
+    </body>
+    </html>
+    """
+    msg.attach(MIMEText(body, 'html'))
+
+    try:
+        server = smtplib.SMTP(settings.SMTP_HOST, settings.SMTP_PORT)
+        server.starttls()
+        server.login(settings.SMTP_USER, settings.SMTP_PASS)
+        server.send_message(msg)
+        server.quit()
+        logging.info(f"Payment notification sent to admin for {user_email}")
+        return True
+    except Exception as e:
+        logging.error(f"Failed to send admin payment notification: {e}")
+        return False
