@@ -20,7 +20,8 @@ class Plan(Document):
     max_accounts: int = 10          # -1 = unlimited
     max_api_keys: int = 10          # -1 = unlimited
     max_proxies: int = 10           # -1 = unlimited
-    max_auto_replies: int = 0       # -1 = unlimited
+    max_auto_replies: int = 0       # Total Rules Limit across all accounts (-1 = unlimited)
+    max_autoreply_accounts: int = 1 # Number of accounts allowed to have auto-reply enabled
     max_reaction_channels: int = 0  # -1 = unlimited
     max_forwarder_channels: int = 0 # -1 = unlimited
     max_bots: int = 1               # -1 = unlimited

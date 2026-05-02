@@ -21,6 +21,7 @@ async def attach_handler(client, account_id: str) -> None:
 
     @client.on(events.NewMessage(incoming=True))
     async def _handler(event):
+        logger.debug(f"[auto-reply] Event triggered for {account_id}")
         await process_message_event(event, account_id)
 
     _attached_handlers[account_id] = _handler
@@ -78,106 +79,141 @@ async def _send_welcome_with_media(client, event, text: str, tg_media: list, del
 
 async def process_message_event(event, account_id: str):
     """Main execution flow for an incoming message."""
+    user_id = "unknown"
     try:
         from app.client_cache import get_client, get_account_user_id, is_user_active
+        from datetime import datetime
+        import zoneinfo
+
         user_id = await get_account_user_id(account_id)
-        if user_id == "unknown": return
+        if user_id == "unknown": 
+            return
         
         # Check if user services are active
         if not await is_user_active(user_id):
             return
 
-        # Passing None to get_client will trigger a DB fetch ONLY if not already in RAM cache.
         client = await get_client(account_id)
-        if not client: return
+        if not client: 
+            await terminal_manager.log_event(user_id, f"❌ Engine Error: Telegram client not found.", account_id, "auto-reply", "ERROR")
+            return
+            
         settings = await get_cached_settings(account_id)
-        if not settings or not settings.is_enabled: return
+        if not settings or not settings.is_enabled:
+            return
 
+        # ── Timezone Handling ────────────────────────────────────────────────
+        tz_str = getattr(settings, "timezone", "Asia/Kolkata")
+        tz = zoneinfo.ZoneInfo(tz_str)
+        now_tz = datetime.now(tz)
+        time_str = now_tz.strftime("%I:%M %p") # e.g. 10:51 PM
+        
         # ── Scope Check ───────────────────────────────────────────────────────
         is_private = event.is_private
         is_group   = event.is_group or event.is_channel
-
-        if is_private and not settings.dm_enabled: return
-        if is_group:
-            if not settings.group_enabled: return
-            if getattr(settings, "group_reply_mode", "all") == "selected":
-                if str(event.chat_id) not in getattr(settings, "allowed_group_ids", []): return
+        
+        # Only log incoming if it passes basic master switch (to avoid spamming logs with ignored group messages)
+        if is_group and not settings.group_enabled:
+            # Silently ignore if disabled globally to keep terminal clean
+            return
+        
+        if is_private and not settings.dm_enabled:
+            return
 
         sender_info = f"UID:{event.sender_id}"
-        await terminal_manager.log_event(user_id, f"Incoming msg from {sender_info}", account_id, "auto-reply", "INFO")
-
-        logger.info(f"[auto-reply] Incoming from {event.sender_id} | private={is_private}")
-
-        # ── Welcome / Night-Shift Flow (DM only) ─────────────────────────────
-        if is_private:
-            night_shift_on = getattr(settings, "night_shift_enabled", False)
-            night_msg      = getattr(settings, "welcome_message_night", "").strip()
-
-            # ─── NIGHT SHIFT MODE ───────────────────────────────────────────
-            if night_shift_on and night_msg:
-                is_day = is_daytime(settings)
-                if not is_day:
-                    if await should_trigger_welcome(client, event.sender_id, event=event):
-                        resolved = await resolve_variables(night_msg, event, client, settings)
-                        night_media = getattr(settings, "night_tg_media", []) or []
-                        await _send_welcome_with_media(
-                            client, event, resolved, night_media, settings.default_delay
-                        )
-                        await mark_read(client, event.chat_id)
-                        await terminal_manager.log_event(account.user_id, f"Sent Night-Shift Welcome to {sender_info}", account_id, "auto-reply", "SUCCESS")
-                        return  # Normal behavior: block keyword rules at night
-                    else:
-                        logger.info(f"[auto-reply] Night session already counted for {event.sender_id}")
-                    
-                    # ─── New Toggle Check ───────────────────────────────────────
-                    if not getattr(settings, "night_allow_rules", False):
-                        return  # Normal behavior: block keyword rules at night
-                    
-                    logger.info(f"[auto-reply] NIGHT shift active but rules are ALLOWED for {event.sender_id}")
-                else:
-                    logger.info(f"[auto-reply] Night Shift ON but it's DAY — running keyword rules for {event.sender_id}")
-
-            # ─── STANDARD WELCOME ───────────────────────────────────────────
-            #  Fires when welcome_enabled=True regardless of time (night_shift_off)
-            elif settings.welcome_enabled and not night_shift_on:
-                if await should_trigger_welcome(client, event.sender_id, event=event):
-                    msg      = getattr(settings, "welcome_message", "").strip()
-                    tg_media = getattr(settings, "welcome_tg_media", []) or []
-                    if msg or tg_media:
-                        resolved = await resolve_variables(msg, event, client, settings) if msg else ""
-                        await _send_welcome_with_media(
-                            client, event, resolved, tg_media, settings.default_delay
-                        )
-                        await mark_read(client, event.chat_id)
-                        await terminal_manager.log_event(account.user_id, f"Sent Standard Welcome to {sender_info}", account_id, "auto-reply", "SUCCESS")
-                    # Fall through — also check keyword rules below
-                else:
-                    logger.info(f"[auto-reply] Welcome cooldown active for {event.sender_id} — running keyword rules")
-                    # Fall through to keyword rules below
+        await terminal_manager.log_event(user_id, f"📩 [{time_str}] Incoming msg from {sender_info}", account_id, "auto-reply", "INFO")
 
         # ── Keyword Rule Matching Flow ────────────────────────────────────────
         rules = await get_cached_rules(account_id)
-        apply_scope = "dm" if is_private else "group"
         msg_text = (event.raw_text or "").strip()
-
-        for rule in rules:
-            if rule.apply_to not in ("both", apply_scope): continue
-            if is_group and getattr(rule, "group_reply_mode", "all") == "selected":
-                if str(event.chat_id) not in getattr(rule, "allowed_group_ids", []):
+        apply_scope = "dm" if is_private else "group"
+        
+        rule_matched = False
+        if rules:
+            for rule in rules:
+                # 1. Scope check
+                if rule.apply_to not in ("both", apply_scope):
                     continue
+                
+                # 2. Group whitelist check
+                if is_group and getattr(rule, "group_reply_mode", "all") == "selected":
+                    if str(event.chat_id) not in getattr(rule, "allowed_group_ids", []):
+                        continue
 
-            if matches_rule(msg_text, rule):
-                delay = rule.delay_seconds or settings.default_delay
-                if delay > 0: await asyncio.sleep(delay)
-                if rule.reply_text:
-                    resolved = await resolve_variables(rule.reply_text, event, client, settings)
-                    await event.reply(resolved)
-                await send_rule_media(client, event, rule)
-                await mark_read(client, event.chat_id)
-                await terminal_manager.log_event(account.user_id, f"Matched Rule '{rule.name}' for {sender_info}", account_id, "auto-reply", "SUCCESS")
-                return
+                # 3. Match check
+                if matches_rule(msg_text, rule):
+                    await terminal_manager.log_event(user_id, f"🎯 Matched: '{rule.name}'", account_id, "auto-reply", "SUCCESS")
+                    
+                    delay = rule.delay_seconds if rule.delay_seconds is not None else settings.default_delay
+                    if delay > 0: 
+                        await asyncio.sleep(delay)
+                    
+                    reply_sent = False
+                    # Text reply
+                    if rule.reply_text:
+                        try:
+                            # Show typing action to look more natural
+                            async with client.action(event.chat_id, 'typing'):
+                                resolved = await resolve_variables(rule.reply_text, event, client, settings)
+                                await client.send_message(event.chat_id, resolved, reply_to=event.id)
+                                reply_sent = True
+                        except Exception as re:
+                            await terminal_manager.log_event(user_id, f"❌ Reply Error: {str(re)}", account_id, "auto-reply", "ERROR")
+                    
+                    # Media reply
+                    if rule.tg_media or rule.media_paths:
+                        try:
+                            await send_rule_media(client, event, rule)
+                            reply_sent = True
+                        except Exception as me:
+                            await terminal_manager.log_event(user_id, f"❌ Media Error: {str(me)}", account_id, "auto-reply", "ERROR")
+
+                    if reply_sent:
+                        await terminal_manager.log_event(user_id, f"📤 Auto-Reply Sent ({rule.name})", account_id, "auto-reply", "SUCCESS")
+                        await mark_read(client, event.chat_id)
+                        return # STOP after first match
+                    
+                    rule_matched = True
+                    break
+
+        # ── Night Shift / Welcome Flow (Only if no keyword matched) ──────────
+        if is_private and not rule_matched:
+            night_shift_on = getattr(settings, "night_shift_enabled", False)
+            is_day = is_daytime(settings)
+            
+            if night_shift_on:
+                if not is_day:
+                    # NIGHT TIME
+                    night_msg = getattr(settings, "welcome_message_night", "").strip()
+                    if night_msg and await should_trigger_welcome(client, event.sender_id, event=event):
+                        resolved = await resolve_variables(night_msg, event, client, settings)
+                        night_media = getattr(settings, "night_tg_media", []) or []
+                        await terminal_manager.log_event(user_id, f"🌙 Night Shift active. Sending welcome...", account_id, "auto-reply", "DEBUG")
+                        await _send_welcome_with_media(client, event, resolved, night_media, settings.default_delay)
+                        await mark_read(client, event.chat_id)
+                        await terminal_manager.log_event(user_id, f"🌙 Sent Night Welcome to {sender_info}", account_id, "auto-reply", "SUCCESS")
+                        return
+                    
+                    # If we reached here in Night Shift, and it wasn't a welcome msg, 
+                    # and no rule matched, we just ignore it (or return).
+                    return
+                else:
+                    await terminal_manager.log_event(user_id, f"☀️ Night Shift enabled but it's currently Day window.", account_id, "auto-reply", "DEBUG")
+
+            # Standard Welcome
+            if settings.welcome_enabled:
+                if await should_trigger_welcome(client, event.sender_id, event=event):
+                    msg = getattr(settings, "welcome_message", "").strip()
+                    tg_media = getattr(settings, "welcome_tg_media", []) or []
+                    if msg or tg_media:
+                        resolved = await resolve_variables(msg, event, client, settings)
+                        await _send_welcome_with_media(client, event, resolved, tg_media, settings.default_delay)
+                        await mark_read(client, event.chat_id)
+                        await terminal_manager.log_event(user_id, f"👋 Sent Standard Welcome to {sender_info}", account_id, "auto-reply", "SUCCESS")
+                        return
+
 
     except Exception as e:
-        u_id = account.user_id if 'account' in locals() and account else "unknown"
-        await terminal_manager.log_event(u_id, f"Engine Error: {str(e)}", account_id, "auto-reply", "ERROR")
-        logger.error(f"[auto-reply] Error processing message: {e}")
+        await terminal_manager.log_event(user_id, f"⚠️ Engine Error: {str(e)}", account_id, "auto-reply", "ERROR")
+        logger.error(f"[auto-reply] Error: {e}", exc_info=True)
+

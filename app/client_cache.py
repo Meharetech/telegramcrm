@@ -217,14 +217,35 @@ async def get_client(
                 print(f"[AUTH_REQUIRED] Account {account_id} is not authorized (Session string might be invalid).")
                 await terminal_manager.log_event(user_id, f"AUTH_REQUIRED: Invalid Session", account_id, "system", "ERROR")
         except Exception as e:
-            print(f"[FAILED] Account {account_id} failed to connect: {e}")
+            import socket
+            error_str = str(e)
+            detailed_reason = ""
+            
+            # Identify specific failure scenarios
+            if proxy_dict:
+                proxy_addr = f"{proxy_dict['addr']}:{proxy_dict['port']}"
+                if any(x in error_str.lower() for x in ["connection failed", "timeout", "retries"]):
+                    detailed_reason = f" (Likely Proxy Issue: {proxy_addr})"
+                else:
+                    detailed_reason = f" (Proxy: {proxy_addr})"
+            
+            if isinstance(e, socket.timeout):
+                detailed_reason = " (Network Timeout)" + detailed_reason
+            elif isinstance(e, ConnectionRefusedError):
+                detailed_reason = " (Connection Refused)" + detailed_reason
+            
+            final_msg = f"Connection FAILED: {error_str}{detailed_reason}"
+            print(f"[FAILED] Account {account_id}: {final_msg}")
+
             from app.services.terminal_service import terminal_manager
             user_id = _account_user_cache.get(account_id)
             if not user_id:
                 account = await TelegramAccount.get(account_id)
                 user_id = str(account.user_id) if account else "unknown"
+                if account: _account_user_cache[account_id] = user_id
+            
             if user_id != "unknown":
-                await terminal_manager.log_event(user_id, f"Connection FAILED: {str(e)}", account_id, "system", "ERROR")
+                await terminal_manager.log_event(user_id, final_msg, account_id, "system", "ERROR")
             raise e
 
         _cache[account_id] = client
@@ -271,6 +292,18 @@ async def invalidate(account_id: str) -> None:
         # FIX: Also clear the WS handlers flag so they re-attach to the NEXT client instance
         from app.api.ws import _ws_handlers_attached
         _ws_handlers_attached.pop(account_id, None)
+
+        # Clear Auto-Reply handler flag to force re-attachment on next get_client
+        try:
+            from app.services.auto_reply.engine import _attached_handlers as ar_handlers
+            ar_handlers.pop(account_id, None)
+        except ImportError: pass
+
+        # Clear Forwarder handler flag to force re-attachment on next get_client
+        try:
+            from app.services.forwarder.logic import _attached_handlers as fwd_handlers
+            fwd_handlers.pop(account_id, None)
+        except ImportError: pass
         
         if client:
             try:

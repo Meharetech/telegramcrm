@@ -60,7 +60,7 @@ async def get_cached_rules(account_id: str) -> List[AutoReplyRule]:
     rules = await AutoReplyRule.find(
         AutoReplyRule.account_id == account_id,
         AutoReplyRule.is_enabled == True
-    ).to_list()
+    ).sort("+created_at").to_list()
     _rules_cache[account_id] = (rules, time.monotonic())
     return rules or []
 

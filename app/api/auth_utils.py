@@ -118,6 +118,7 @@ async def check_plan_limit(user: User, field: str, current_count: Optional[int] 
     # If the user has manual force-enable/disable for the service corresponding to this field
     service_map = {
         "max_auto_replies": "auto_reply",
+        "max_autoreply_accounts": "auto_reply",
         "access_group_scraping": "scraper",
         "access_member_adding": "member_adding",
         "max_reaction_channels": "reactions",

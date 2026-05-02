@@ -68,6 +68,7 @@ class PlanCreate(BaseModel):
     max_api_keys: int = 10
     max_proxies: int = 10
     max_auto_replies: int = 0
+    max_autoreply_accounts: int = 1
     max_reaction_channels: int = 0
     max_forwarder_channels: int = 0
     access_chat_message: bool = False
@@ -94,6 +95,7 @@ class PlanUpdate(BaseModel):
     max_api_keys: Optional[int] = None
     max_proxies: Optional[int] = None
     max_auto_replies: Optional[int] = None
+    max_autoreply_accounts: Optional[int] = None
     max_reaction_channels: Optional[int] = None
     max_forwarder_channels: Optional[int] = None
     access_chat_message: Optional[bool] = None
@@ -186,6 +188,7 @@ def plan_to_dict(p: Plan) -> dict:
         "max_api_keys": p.max_api_keys,
         "max_proxies": p.max_proxies,
         "max_auto_replies": p.max_auto_replies,
+        "max_autoreply_accounts": getattr(p, "max_autoreply_accounts", 1),
         "max_reaction_channels": p.max_reaction_channels,
         "max_forwarder_channels": p.max_forwarder_channels,
         "access_chat_message": p.access_chat_message,
@@ -454,7 +457,7 @@ async def get_my_plan(current_user: User = Depends(get_current_user)):
         
         # Map of disabled_services IDs to plan field names
         service_map = {
-            "auto_reply": ["max_auto_replies", "access_chat_message"],
+            "auto_reply": ["max_auto_replies", "max_autoreply_accounts", "access_chat_message"],
             "scraper": ["access_group_scraping", "access_member_adding"],
             "reactions": ["max_reaction_channels"],
             "forwarder": ["max_forwarder_channels"],

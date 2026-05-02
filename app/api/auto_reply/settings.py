@@ -5,10 +5,25 @@ from app.models import TelegramAccount, User
 from app.api.auth_utils import get_current_user
 from bson import ObjectId
 from .schemas import SettingsPayload
+from app.models.auto_reply import AutoReplyRule
 from .worker import _activate_worker
 from app.services.auto_reply.cache import invalidate_settings_cache
 
 router = APIRouter()
+
+@router.get("/stats")
+async def get_stats(current_user: User = Depends(get_current_user)):
+    """Returns rule count and active auto-reply account count for the current user."""
+    rule_count = await AutoReplyRule.find(AutoReplyRule.user_id == str(current_user.id)).count()
+    active_accounts_count = await AutoReplySettings.find(
+        AutoReplySettings.user_id == str(current_user.id),
+        AutoReplySettings.is_enabled == True
+    ).count()
+    
+    return {
+        "rule_count": rule_count,
+        "active_accounts_count": active_accounts_count
+    }
 
 @router.get("/settings/{account_id}")
 async def get_settings(account_id: str, current_user: User = Depends(get_current_user)):
@@ -58,8 +73,17 @@ async def upsert_settings(account_id: str, payload: SettingsPayload, current_use
     # ── Invalidate in-memory cache so the engine picks up the new settings immediately ──
     invalidate_settings_cache(account_id)
 
-    # If enabling, attach the handler to the cached client
+    # If enabling, check plan limit for active accounts
     if payload.is_enabled:
+        from app.api.auth_utils import check_plan_limit
+        # Count other accounts that have auto-reply enabled
+        active_count = await AutoReplySettings.find(
+            AutoReplySettings.user_id == str(current_user.id),
+            AutoReplySettings.account_id != account_id,
+            AutoReplySettings.is_enabled == True
+        ).count()
+        await check_plan_limit(current_user, "max_autoreply_accounts", active_count)
+        
         await _activate_worker(account_id)
 
     return {"status": "ok"}

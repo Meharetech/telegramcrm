@@ -100,25 +100,28 @@ def is_daytime(settings) -> bool:
         tz = zoneinfo.ZoneInfo(tz_str)
         now_tz = datetime.now(tz)
         current_hhmm = now_tz.strftime("%H:%M")
+        current_display = now_tz.strftime("%I:%M %p")
 
-        raw_start = getattr(settings, "day_start", "09:00")
-        raw_end   = getattr(settings, "day_end",   "09:00")
+        raw_start = getattr(settings, "day_start", "06:00")
+        raw_end   = getattr(settings, "day_end",   "11:00")
         ampm_start = getattr(settings, "day_start_ampm", "AM")
         ampm_end   = getattr(settings, "day_end_ampm",   "PM")
 
         def to_24h(hhmm: str, ampm: str) -> str:
             parts = hhmm.split(":")
-            h = int(parts[0]) % 12   # normalise 12 → 0 first
+            h = int(parts[0])
+            if ampm == "PM" and h < 12:
+                h += 12
+            elif ampm == "AM" and h == 12:
+                h = 0
             m = parts[1] if len(parts) > 1 else "00"
-            if ampm == "PM":
-                h += 12              # 0 PM=12, 1 PM=13 … 11 PM=23
             return f"{h:02d}:{m}"
 
         start_24 = to_24h(raw_start, ampm_start)
         end_24   = to_24h(raw_end,   ampm_end)
 
         logger.info(
-            f"[auto-reply] Time Check | Local: {current_hhmm} "
+            f"[auto-reply] Time Check | Local: {current_hhmm} ({current_display}) "
             f"| DayWindow: {start_24}–{end_24} | Zone: {tz_str}"
         )
 
@@ -130,7 +133,6 @@ def is_daytime(settings) -> bool:
             # Day crosses midnight: daytime is start→midnight→end
             is_day = current_hhmm >= start_24 or current_hhmm <= end_24
 
-        logger.info(f"[auto-reply] Is Daytime? {is_day}")
         return is_day
 
     except Exception as e:
@@ -214,6 +216,7 @@ async def should_trigger_welcome(client, sender_id: int, event=None) -> bool:
 def matches_rule(msg_text: str, rule) -> bool:
     """Determine if the message text triggers the given rule."""
     if rule.trigger_type == "any":
+        logger.info(f"[auto-reply] Rule '{rule.name}' triggered via ANY match.")
         return True
 
     if rule.trigger_type == "keyword" and rule.keywords:

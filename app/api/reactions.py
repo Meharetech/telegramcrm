@@ -17,6 +17,31 @@ class ReactionRequest(BaseModel):
     min_delay: int = 5
     max_delay: int = 15
 
+@router.get("/stats")
+async def get_reaction_stats(user=Depends(get_current_user)):
+    """
+    Returns usage stats for the reactions dashboard.
+    """
+    from app.models.plan import Plan
+    from bson import ObjectId
+    
+    current_tasks = await ReactionTask.find(
+        ReactionTask.user_id == str(user.id), 
+        ReactionTask.status != "cancelled", 
+        ReactionTask.status != "done"
+    ).count()
+    
+    limit = 0
+    if user.plan_id:
+        plan = await Plan.get(ObjectId(user.plan_id))
+        if plan:
+            limit = plan.max_reaction_channels
+            
+    return {
+        "used": current_tasks,
+        "limit": limit
+    }
+
 @router.post("/start")
 async def start_reaction_task(req: ReactionRequest, background_tasks: BackgroundTasks, user=Depends(get_current_user)):
     """
