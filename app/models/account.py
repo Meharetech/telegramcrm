@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, List
 from beanie import Document, Indexed
 from bson import ObjectId
@@ -14,7 +14,7 @@ class TelegramAccount(Document):
     password: Optional[str] = None  # Store 2FA password if provided
     is_active: bool = True
     status: str = "disconnected"  # disconnected, connecting, online, error
-    daily_contacts_limit: int = 200
+    daily_contacts_limit: int = 20
     contacts_added_today: int = 0
     last_contact_add_date: Optional[datetime] = None
     daily_messages_limit: int = 20
@@ -25,7 +25,7 @@ class TelegramAccount(Document):
     last_message_at: Optional[datetime] = None # Timestamp of last incoming message
     last_sync_date: Optional[datetime] = None
     flood_wait_until: Optional[datetime] = None # For persistent flood management
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     last_check_status: Optional[str] = None
     last_check_time: Optional[datetime] = None
     

@@ -501,6 +501,7 @@ async def list_accounts(
                 "created_at": a.created_at,
                 "last_check_status": a.last_check_status,
                 "last_check_time": a.last_check_time,
+                "active_task_type": a.active_task_type,
                 "proxy": {
                     "host": proxy.host,
                     "port": proxy.port,
@@ -657,3 +658,41 @@ async def check_ban(account_id: str, current_user: User = Depends(get_current_us
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
+@router.post("/{account_id}/reset-status")
+async def reset_account_status(account_id: str, current_user: User = Depends(get_current_user)):
+    from bson import ObjectId
+    try:
+        acc = await TelegramAccount.find_one(
+            TelegramAccount.id == ObjectId(account_id),
+            TelegramAccount.user_id == str(current_user.id)
+        )
+        if not acc:
+            raise HTTPException(status_code=404, detail="Account not found")
+        
+        acc.active_task_id = None
+        acc.active_task_type = None
+        await acc.save()
+        
+        return {"status": "success", "message": "Account status reset successfully"}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@router.post("/reset-all-status")
+async def reset_all_account_statuses(current_user: User = Depends(get_current_user)):
+    """Bulk-unlock all busy accounts for the current user."""
+    try:
+        busy_accounts = await TelegramAccount.find(
+            TelegramAccount.user_id == str(current_user.id),
+            TelegramAccount.active_task_type != None
+        ).to_list()
+
+        count = 0
+        for acc in busy_accounts:
+            acc.active_task_id = None
+            acc.active_task_type = None
+            await acc.save()
+            count += 1
+
+        return {"status": "success", "message": f"Successfully unlocked {count} accounts.", "unlocked": count}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))

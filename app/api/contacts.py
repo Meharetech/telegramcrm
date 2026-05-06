@@ -503,8 +503,10 @@ async def get_contacts_overview(
             "id": str(acc.id),
             "phone": acc.phone_number,
             "contact_count": acc.contact_count,
-            "daily_limit": acc.daily_contacts_limit,
-            "added_today": acc.contacts_added_today,
+            "daily_contacts_limit": acc.daily_contacts_limit,
+            "contacts_added_today": acc.contacts_added_today,
+            "daily_messages_limit": acc.daily_messages_limit,
+            "messages_sent_today": acc.messages_sent_today,
             "status": acc.status,
             "last_sync": acc.last_sync_date,
             "flood_wait_until": acc.flood_wait_until,
@@ -711,13 +713,23 @@ async def update_account_limit(
     if not acc:
         raise HTTPException(status_code=403, detail="Unauthorized")
     
-    limit = body.get("limit")
-    if limit is None or limit < 0:
-        raise HTTPException(status_code=400, detail="Invalid limit")
+    contacts_limit = body.get("contacts_limit")
+    messages_limit = body.get("messages_limit")
     
-    acc.daily_contacts_limit = limit
+    if contacts_limit is not None:
+        if contacts_limit < 0: raise HTTPException(status_code=400, detail="Invalid contacts limit")
+        acc.daily_contacts_limit = contacts_limit
+        
+    if messages_limit is not None:
+        if messages_limit < 0: raise HTTPException(status_code=400, detail="Invalid messages limit")
+        acc.daily_messages_limit = messages_limit
+    
     await acc.save()
-    return {"status": "success", "new_limit": limit}
+    return {
+        "status": "success", 
+        "daily_contacts_limit": acc.daily_contacts_limit,
+        "daily_messages_limit": acc.daily_messages_limit
+    }
 
 # ── Delete contacts ───────────────────────────────────────────────────────────
 @router.post("/{account_id}/delete")

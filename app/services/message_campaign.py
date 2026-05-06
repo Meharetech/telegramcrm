@@ -149,22 +149,27 @@ class ActiveMessageCampaign:
                 if not acc or not acc.is_active: continue
                 
                 # Check for persistent FloodWait
-                if acc.flood_wait_until and acc.flood_wait_until > now_utc:
-                    wait_left = (acc.flood_wait_until - now_utc).total_seconds()
-                    await self.add_log("log", f"⏳ {acc.phone_number} on FloodWait for {int(wait_left)}s. Skipping.", "WARNING")
-                    continue
+                flood_until = acc.flood_wait_until
+                if flood_until:
+                    if flood_until.tzinfo is None:
+                        flood_until = flood_until.replace(tzinfo=timezone.utc)
+                    
+                    if flood_until > now_utc:
+                        wait_left = (flood_until - now_utc).total_seconds()
+                        await self.add_log("log", f"⏳ {acc.phone_number} on FloodWait for {int(wait_left)}s. Skipping.", "WARNING")
+                        continue
 
                 # Check Daily Limits
-                if acc.last_contact_add_date and acc.last_contact_add_date.date() < now_utc.date():
-                    acc.contacts_added_today = 0
+                if acc.last_message_sent_date and acc.last_message_sent_date.date() < now_utc.date():
+                    acc.messages_sent_today = 0
                 
-                if acc.contacts_added_today >= acc.daily_contacts_limit:
-                    await self.add_log("log", f"⚠️ {acc.phone_number} reached daily limit. Skipping.", "WARNING")
+                if acc.messages_sent_today >= acc.daily_messages_limit:
+                    await self.add_log("log", f"⚠️ {acc.phone_number} reached daily message limit. Skipping.", "WARNING")
                     continue
 
                 if acc.active_task_id and acc.active_task_id != self.job_id:
-                    await self.add_log("log", f"⏳ {acc.phone_number} is already busy with task {acc.active_task_type}. Skipping.", "WARNING")
-                    continue
+                    await self.add_log("log", f"ℹ️ {acc.phone_number} is currently busy with {acc.active_task_type}. Proceeding anyway.", "WARNING")
+                    # No longer skipping. User requested to use busy accounts.
 
                 try:
                     client = await get_client(str(acc.id), acc.session_string, acc.api_id, acc.api_hash, device_model=acc.device_model)
@@ -315,6 +320,8 @@ class ActiveMessageCampaign:
                         
                         pending = self.total_targets - self.done_count
                         await self.add_log("progress", f"✅ {acc_task['phone']} sent to {target} (Pending: {pending})", "SUCCESS", data={
+                            "acc_id": acc_task["acc_id"],
+                            "messages_sent_today": db_acc.messages_sent_today,
                             "done": self.done_count,
                             "pending": pending,
                             "total": self.total_targets,

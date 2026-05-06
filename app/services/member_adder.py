@@ -201,10 +201,15 @@ class ActiveMemberAdder:
                     continue
 
                 # FloodWait check
-                if acc.flood_wait_until and acc.flood_wait_until > now_utc:
-                    wait_left = (acc.flood_wait_until - now_utc).total_seconds()
-                    await self.add_log("log", f"⏳ {acc.phone_number} on FloodWait for {int(wait_left)}s. Skipping.", "WARNING")
-                    continue
+                flood_until = acc.flood_wait_until
+                if flood_until:
+                    if flood_until.tzinfo is None:
+                        flood_until = flood_until.replace(tzinfo=timezone.utc)
+                    
+                    if flood_until > now_utc:
+                        wait_left = (flood_until - now_utc).total_seconds()
+                        await self.add_log("log", f"⏳ {acc.phone_number} on FloodWait for {int(wait_left)}s. Skipping.", "WARNING")
+                        continue
 
                 # Daily limit check
                 if acc.last_contact_add_date and acc.last_contact_add_date.date() < now_utc.date():
@@ -214,9 +219,9 @@ class ActiveMemberAdder:
                     continue
 
                 # Busy check
-                if acc.active_task_id and acc.active_task_id != self.job_id:
-                    await self.add_log("log", f"⏳ {acc.phone_number} is busy with {acc.active_task_type}. Skipping.", "WARNING")
-                    continue
+                if (acc.active_task_id and acc.active_task_id != self.job_id):
+                    await self.add_log("log", f"ℹ️ {acc.phone_number} is currently busy with {acc.active_task_type}. Proceeding anyway.", "WARNING")
+                    # No longer skipping. User requested to use busy accounts.
 
                 try:
                     client = await get_client(str(acc.id), acc.session_string, acc.api_id, acc.api_hash, device_model=acc.device_model)
@@ -387,6 +392,8 @@ class ActiveMemberAdder:
                         acc_task["consecutive_privacy_errors"] = 0
                         progress_str = f"[{acc_task['this_task_done']}/{acc_task['target_count']}]"
                         await self.add_log("progress", f"✅ {acc_task['phone']} {progress_str} added {id_label}", "SUCCESS", data={
+                            "acc_id": acc_task["acc_id"],
+                            "contacts_added_today": db_acc.contacts_added_today,
                             "done": self.done_count,
                             "added": 1
                         })

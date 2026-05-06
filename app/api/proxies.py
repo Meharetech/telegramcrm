@@ -78,15 +78,16 @@ async def batch_add_proxies(req: BatchProxyRequest, current_user: User = Depends
     
     # 4. Auto-assign to existing accounts
     accounts = await TelegramAccount.find(TelegramAccount.user_id == user_id_str).to_list()
-    inserted_proxies = await Proxy.find(Proxy.user_id == user_id_str).to_list()
+    # Fetch all proxies (including those just inserted)
+    all_proxies = await Proxy.find(Proxy.user_id == user_id_str).to_list()
     
     affected_accounts = []
     
-    # Use BulkWriter for O(1) high-speed MongoDB commit
+    # Simple assignment: Assign each account a proxy until we run out of proxies or accounts
     async with BulkWriter() as bulk:
         for idx, account in enumerate(accounts):
-            if idx < len(inserted_proxies):
-                proxy = inserted_proxies[idx]
+            if idx < len(all_proxies):
+                proxy = all_proxies[idx]
                 proxy.assigned_account_id = str(account.id)
                 await proxy.save(bulk_writer=bulk)
                 affected_accounts.append(str(account.id))
@@ -139,3 +140,40 @@ async def clear_all_proxies(current_user: User = Depends(get_current_user)):
         await invalidate(acc_id)
         
     return {"status": "success"}
+@router.post("/auto-assign")
+async def auto_assign_proxies(current_user: User = Depends(get_current_user)):
+    user_id_str = str(current_user.id)
+    
+    # 1. Get all accounts and proxies for this user
+    accounts = await TelegramAccount.find(TelegramAccount.user_id == user_id_str).to_list()
+    proxies = await Proxy.find(Proxy.user_id == user_id_str).to_list()
+    
+    # 2. Identify which accounts are currently using a proxy
+    assigned_acc_ids = {p.assigned_account_id for p in proxies if p.assigned_account_id}
+    
+    # 3. Filter for accounts that are "Direct Connection" (no assigned proxy)
+    accounts_to_assign = [a for a in accounts if str(a.id) not in assigned_acc_ids]
+    
+    # 4. Filter for "Idle" proxies (no assigned account)
+    idle_proxies = [p for p in proxies if not p.assigned_account_id]
+    
+    if not accounts_to_assign:
+        return {"status": "success", "message": "All accounts already have proxies assigned."}
+    if not idle_proxies:
+        raise HTTPException(status_code=400, detail="No idle proxies available for assignment.")
+    
+    assigned_count = 0
+    async with BulkWriter() as bulk:
+        for idx, account in enumerate(accounts_to_assign):
+            if idx < len(idle_proxies):
+                proxy = idle_proxies[idx]
+                proxy.assigned_account_id = str(account.id)
+                await proxy.save(bulk_writer=bulk)
+                assigned_count += 1
+                # Invalidate cache so client reconnects with proxy
+                await invalidate(str(account.id))
+                
+    return {
+        "status": "success", 
+        "message": f"Successfully assigned {assigned_count} idle proxies to 'Direct Connection' accounts."
+    }

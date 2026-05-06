@@ -93,14 +93,20 @@ async def start_bot(bot: BotForwarder):
     )
 
     from telethon.errors.rpcerrorlist import FloodWaitError
-    from datetime import datetime, timedelta
+    from datetime import datetime, timedelta, timezone
     from app.services.terminal_service import terminal_manager
 
     # 4. Check if currently locked by FloodWait
-    if bot.flood_wait_until and bot.flood_wait_until > datetime.utcnow():
-        wait_sec = int((bot.flood_wait_until - datetime.utcnow()).total_seconds())
-        await terminal_manager.log_event(str(bot.user_id), f"⏳ {bot.name} is LOCKED by Telegram for another {wait_sec}s. Skipping start.", bot_id, "bot_hub", "WARNING")
-        return
+    flood_until = bot.flood_wait_until
+    if flood_until:
+        if flood_until.tzinfo is None:
+            flood_until = flood_until.replace(tzinfo=timezone.utc)
+        
+        now_utc = datetime.now(timezone.utc)
+        if flood_until > now_utc:
+            wait_sec = int((flood_until - now_utc).total_seconds())
+            await terminal_manager.log_event(str(bot.user_id), f"⏳ {bot.name} is LOCKED by Telegram for another {wait_sec}s. Skipping start.", bot_id, "bot_hub", "WARNING")
+            return
 
     try:
         # This is where the FloodWait occurs if called too often
@@ -119,7 +125,7 @@ async def start_bot(bot: BotForwarder):
         
     except FloodWaitError as e:
         # ── EXTREMELY IMPORTANT: Catch and Store FloodWait ──
-        unlock_time = datetime.utcnow() + timedelta(seconds=e.seconds)
+        unlock_time = datetime.now(timezone.utc) + timedelta(seconds=e.seconds)
         bot.flood_wait_until = unlock_time
         await bot.save()
         
