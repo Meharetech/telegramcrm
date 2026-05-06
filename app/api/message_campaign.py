@@ -148,6 +148,25 @@ async def get_message_campaign_history(current_user: User = Depends(get_current_
     ).sort(-MessageCampaignJob.updated_at).limit(20).to_list()
     return jobs
 
+@router.delete("/history-all")
+async def delete_all_message_campaign_history(current_user: User = Depends(get_current_user)):
+    user_id = str(current_user.id)
+    await MessageCampaignJob.find(MessageCampaignJob.user_id == user_id).delete()
+    return {"status": "success", "message": "All history cleared"}
+
+@router.delete("/history/{job_id}")
+async def delete_message_campaign_history(job_id: str, current_user: User = Depends(get_current_user)):
+    user_id = str(current_user.id)
+    job = await MessageCampaignJob.find_one(
+        MessageCampaignJob.id == ObjectId(job_id),
+        MessageCampaignJob.user_id == user_id
+    )
+    if not job:
+        raise HTTPException(status_code=404, detail="History entry not found")
+    
+    await job.delete()
+    return {"status": "success", "message": "History entry deleted"}
+
 @router.post("/schedule")
 async def schedule_message_campaign(req: MessageCampaignScheduleRequest, current_user: User = Depends(get_current_user)):
     user_id = str(current_user.id)

@@ -18,7 +18,7 @@ import logging
 import re
 from telethon import events
 from telethon.tl.types import MessageMediaWebPage
-from app.client_cache import get_client
+from app.client_cache import get_client, get_cached_client
 from app.models.forwarder import ForwarderRule
 from app.models import TelegramAccount
 from app.services.terminal_service import terminal_manager
@@ -212,11 +212,9 @@ async def stop_forwarder_for_rule(account_id: str, rule_id: str):
     account = await TelegramAccount.get(account_id)
     if account and account.session_string:
         try:
-            client = await get_client(
-                account_id, account.session_string, account.api_id, account.api_hash,
-                device_model=getattr(account, "device_model", "Telegram Android"),
-            )
-            client.remove_event_handler(_attached_handlers[account_id][rule_id])
+            client = await get_cached_client(account_id)
+            if client:
+                client.remove_event_handler(_attached_handlers[account_id][rule_id])
         except Exception as e:
             logger.warning(f"[forwarder] Could not remove handler for rule {rule_id}: {e}")
 
@@ -233,11 +231,12 @@ async def stop_all_forwarders_for_account(account_id: str):
         return
 
     try:
-        client = await get_client(account_id, account.session_string, account.api_id, account.api_hash)
-        for rule_id, handler in list(_attached_handlers[account_id].items()):
-            try:
-                client.remove_event_handler(handler)
-            except Exception: pass
+        client = await get_cached_client(account_id)
+        if client:
+            for rule_id, handler in list(_attached_handlers[account_id].items()):
+                try:
+                    client.remove_event_handler(handler)
+                except Exception: pass
         
         del _attached_handlers[account_id]
         logger.info(f"[forwarder] All rules detached for account {account_id}")

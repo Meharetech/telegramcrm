@@ -209,3 +209,24 @@ async def get_mission_history(current_user: User = Depends(get_current_user)):
     ).sort(-MemberAddJob.updated_at).limit(20).to_list()
     
     return jobs
+
+@router.delete("/history-all")
+async def delete_all_mission_history(current_user: User = Depends(get_current_user)):
+    from app.models.member_add_job import MemberAddJob
+    user_id = str(current_user.id)
+    await MemberAddJob.find(MemberAddJob.user_id == user_id).delete()
+    return {"status": "success", "message": "All history cleared"}
+
+@router.delete("/history/{job_id}")
+async def delete_mission_history(job_id: str, current_user: User = Depends(get_current_user)):
+    from app.models.member_add_job import MemberAddJob
+    user_id = str(current_user.id)
+    job = await MemberAddJob.find_one(
+        MemberAddJob.id == ObjectId(job_id),
+        MemberAddJob.user_id == user_id
+    )
+    if not job:
+        raise HTTPException(status_code=404, detail="History entry not found")
+    
+    await job.delete()
+    return {"status": "success", "message": "History entry deleted"}

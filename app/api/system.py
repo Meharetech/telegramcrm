@@ -16,16 +16,19 @@ router = APIRouter()
 async def stop_all_services(current_user: User = Depends(get_current_user)):
     # ── Universal Stop Logic ──────────────────────────────────────────────────
     user_id = str(current_user.id)
+    from app.client_cache import refresh_user_status_cache
+    await refresh_user_status_cache(user_id)
     
     # 1. Clear Terminal Logs for fresh view
     from app.models.system_log import SystemLog
     await SystemLog.find(SystemLog.user_id == user_id).delete()
     
     # 2. Stop Accounts & Handlers (Auto-Reply & Forwarder)
+    from app.client_cache import get_cached_client
     accounts = await TelegramAccount.find(TelegramAccount.user_id == user_id).to_list()
     for acc in accounts:
         acc_id = str(acc.id)
-        client = await get_client(acc_id, acc.session_string, acc.api_id, acc.api_hash)
+        client = await get_cached_client(acc_id)
         
         # Stop Auto-Reply
         from app.services.auto_reply.engine import detach_account
@@ -78,6 +81,8 @@ class StartOptions(BaseModel):
 @router.post("/start-all")
 async def start_all_services(options: StartOptions, current_user: User = Depends(get_current_user)):
     user_id = str(current_user.id)
+    from app.client_cache import refresh_user_status_cache
+    await refresh_user_status_cache(user_id)
     
     # ── Universal Start Logic ─────────────────────────────────────────────────
     accounts = await TelegramAccount.find(TelegramAccount.user_id == user_id).to_list()

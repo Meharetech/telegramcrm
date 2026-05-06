@@ -127,3 +127,23 @@ async def activate_forwarder(account_id: str, current_user: User = Depends(get_c
         raise HTTPException(status_code=403, detail="Unauthorized account access")
     await start_forwarder_for_account(account_id)
     return {"status": "success", "message": "Forwarder activated"}
+@router.get("/stats")
+async def get_forwarder_stats(user=Depends(get_current_user)):
+    """
+    Returns usage stats for the forwarder dashboard.
+    """
+    from app.models.plan import Plan
+    from bson import ObjectId
+    
+    used = await ForwarderRule.find(ForwarderRule.user_id == str(user.id)).count()
+    
+    limit = 0
+    if user.plan_id:
+        plan = await Plan.get(ObjectId(user.plan_id))
+        if plan:
+            limit = plan.max_forwarder_channels
+            
+    return {
+        "used": used,
+        "limit": limit
+    }
