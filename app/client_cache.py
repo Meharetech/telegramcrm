@@ -25,7 +25,7 @@ import gc
 from datetime import datetime, timezone, timedelta
 from typing import Dict, Optional
 
-from telethon import TelegramClient
+from telethon import TelegramClient, errors
 from telethon.sessions import StringSession
 import socks
 from app.models import TelegramAccount, Proxy
@@ -133,11 +133,20 @@ async def get_client(
                     if client.is_connected():
                         print(f"[SUCCESS] Account {account_id} reconnected in-place.")
                         return client
+                except errors.AuthKeyUnregisteredError:
+                    logger.error(f"[cache] Session for {account_id} revoked (AuthKeyUnregisteredError)")
+                    _cache.pop(account_id, None)
+                    _last_used.pop(account_id, None)
+                    # We don't raise here, we let it fall through to fresh creation which will fail too if key is dead
                 except Exception as e:
                     print(f"[RECONNECT_FAILED] Account {account_id} loop failed: {e}")
                 
                 # Reconnect failed — fall through to create a new client
                 logger.warning(f"[cache] In-place reconnect failed for {account_id}, creating fresh client")
+            except errors.AuthKeyUnregisteredError:
+                logger.error(f"[cache] Session for {account_id} revoked during health check")
+                _cache.pop(account_id, None)
+                _last_used.pop(account_id, None)
             except Exception as e:
                 logger.warning(f"[cache] Reconnect error for {account_id}: {e}")
             # FIX: Remove the broken client so a concurrent caller cannot

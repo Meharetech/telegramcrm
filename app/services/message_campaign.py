@@ -215,12 +215,20 @@ class ActiveMessageCampaign:
                 }
             })
             for a in self.accounts_to_use:
-                await self.add_log("log", f"✅ Account {a['phone']} ready. Goal: {a['target_count']} messages.", "SUCCESS")
+                target_info = f" (Available Targets: {len(a.get('targets', []))})" if self.method == 'contact' else ""
+                await self.add_log("log", f"✅ Account {a['phone']} ready. Goal: {a['target_count']}{target_info}", "SUCCESS")
 
             if self.method == 'username':
                 self.total_targets = min(len(self.username_list), sum(a["target_count"] for a in self.accounts_to_use))
+                if not self.global_username_queue:
+                    # Sync queue if it was somehow empty
+                    self.global_username_queue = list(self.username_list)
             else:
                 self.total_targets = sum(min(len(a["targets"]), a["target_count"]) for a in self.accounts_to_use)
+
+            if self.total_targets <= 0:
+                await self.add_log("error", f"❌ No targets found to message. (Method: {self.method})", "ERROR")
+                return
 
             await self.add_log("status", f"📂 Campaign target: {self.total_targets} users. Starting rotation...", data={"total": self.total_targets})
 
@@ -309,7 +317,8 @@ class ActiveMessageCampaign:
                             await self.add_log("log", f"🔄 {acc_task['phone']} disconnected. Reconnecting...", "WARNING")
                             acc_task["client"] = await get_client(acc_task["acc_id"])
 
-                        await acc_task["client"].send_message(target, message_to_send)
+                        if self.stop_requested: break
+                        await acc_task["client"].send_message(target, message=message_to_send)
                         
                         # ── Success Lifecycle ──────────────────────────────────
                         self.done_count += 1
@@ -348,6 +357,11 @@ class ActiveMessageCampaign:
                         else:
                             await self.add_log("log", f"⏳ Short FloodWait ({e.seconds}s) for {acc_task['phone']}. Cooling down.", "WARNING")
                             acc_task["next_work_at"] = time.time() + e.seconds
+                            # Put target back so someone else can take it
+                            if self.method == 'username' and target:
+                                self.global_username_queue.insert(0, target)
+                            elif self.method == 'contact' and target:
+                                acc_task["targets"].insert(0, {"id": target, "username": "", "phone": ""})
                             continue 
                     except PeerFloodError:
                         acc_task["failed"] = True
@@ -369,6 +383,11 @@ class ActiveMessageCampaign:
                             db_acc.flood_wait_until = datetime.now(timezone.utc) + timedelta(hours=24)
                             await db_acc.save()
                             await self.add_log("log", f"🔴 {acc_task['phone']}: Critical Error ({err_str}). Account stopped for 24h.", "ERROR")
+                            # Put target back
+                            if self.method == 'username' and target:
+                                self.global_username_queue.insert(0, target)
+                            elif self.method == 'contact' and target:
+                                acc_task["targets"].insert(0, {"id": target, "username": "", "phone": ""})
                         else:
                             self.errors_count += 1
                             await self.add_log("log", f"❌ RPC Error: {err_str}", "ERROR")
@@ -378,7 +397,13 @@ class ActiveMessageCampaign:
                             acc_task["next_work_at"] = time.time() + 60 
                     except Exception as e:
                         self.errors_count += 1
-                        await self.add_log("log", f"❌ Unexpected Error: {str(e)}", "ERROR")
+                        await self.add_log("log", f"❌ Unexpected Error with {acc_task['phone']}: {str(e)}", "ERROR")
+                        # Put target back if it failed
+                        if self.method == 'username' and target:
+                            self.global_username_queue.insert(0, target)
+                        elif self.method == 'contact' and target:
+                            # Re-add to this account's local targets
+                            acc_task["targets"].insert(0, {"id": target, "username": "", "phone": ""})
 
                     # Per-step cooldown
                     delay = random.randint(min_d, max_d)
@@ -395,7 +420,8 @@ class ActiveMessageCampaign:
 
                 if not found_ready:
                     # Optimized sleep to yield control in high-concurrency environments
-                    await asyncio.sleep(0.5) 
+                    # Reduced to 0.1s for faster response to stop_requested
+                    await asyncio.sleep(0.1) 
 
             # ── Final Report ──────────────────────────────────────────────────
             status_event = "done"

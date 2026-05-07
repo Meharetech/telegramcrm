@@ -389,7 +389,9 @@ class ActiveMemberAdder:
                             acc_task["client"] = await get_client(acc_task["acc_id"])
 
                         # Resolve the entity first so Telethon knows what type it is
+                        if self.stop_requested: break
                         resolved = await acc_task["client"].get_input_entity(user_input)
+                        if self.stop_requested: break
                         await acc_task["client"](functions.channels.InviteToChannelRequest(
                             channel=acc_task["target_group"],
                             users=[resolved]
@@ -513,7 +515,8 @@ class ActiveMemberAdder:
                 if not any_working:
                     break
                 if not any_ready:
-                    await asyncio.sleep(1)
+                    # Reduced to 0.1s for faster response to stop_requested
+                    await asyncio.sleep(0.1)
 
             # ── Step 6: Mission Summary ────────────────────────────────────────
             if self.stop_requested:

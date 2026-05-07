@@ -8,7 +8,7 @@ from fastapi.responses import StreamingResponse
 from app.models import TelegramAccount, Reminder
 from app.api.accounts.utils import format_status
 from app.client_cache import get_client
-from telethon import functions, types
+from telethon import functions, types, errors
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
@@ -103,6 +103,11 @@ async def get_account_chats(account_id: str, limit: int = 50, offset_date: Optio
             })
 
         return chats
+    except errors.AuthKeyUnregisteredError:
+        logging.error(f"Session for account {account_id} has been revoked or expired.")
+        account.status = "offline"
+        await account.save()
+        raise HTTPException(status_code=401, detail="Telegram session expired. Please re-connect this account.")
     except Exception as e:
         logging.error(f"Error fetching chats: {e}")
         raise HTTPException(status_code=500, detail=str(e))

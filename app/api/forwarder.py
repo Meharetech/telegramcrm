@@ -128,15 +128,32 @@ async def activate_forwarder(account_id: str, current_user: User = Depends(get_c
     await start_forwarder_for_account(account_id)
     return {"status": "success", "message": "Forwarder activated"}
 @router.get("/stats")
-async def get_forwarder_stats(user=Depends(get_current_user)):
+async def get_forwarder_stats(user: User = Depends(get_current_user)):
     """
     Returns usage stats for the forwarder dashboard.
     """
     from app.models.plan import Plan
     from bson import ObjectId
+    from app.models.account import TelegramAccount
     
+    # Rule count
     used = await ForwarderRule.find(ForwarderRule.user_id == str(user.id)).count()
     
+    # Find accounts with enabled forwarders
+    active_rules = await ForwarderRule.find(
+        ForwarderRule.user_id == str(user.id),
+        ForwarderRule.is_enabled == True
+    ).to_list()
+    
+    active_account_ids = list(set([ObjectId(r.account_id) for r in active_rules if r.account_id]))
+    
+    active_phones = []
+    if active_account_ids:
+        accounts = await TelegramAccount.find(
+            {"_id": {"$in": active_account_ids}}
+        ).to_list()
+        active_phones = [a.phone_number for a in accounts]
+
     limit = 0
     if user.plan_id:
         plan = await Plan.get(ObjectId(user.plan_id))
@@ -145,5 +162,7 @@ async def get_forwarder_stats(user=Depends(get_current_user)):
             
     return {
         "used": used,
-        "limit": limit
+        "limit": limit,
+        "active_phones": active_phones,
+        "active_accounts_count": len(active_account_ids)
     }

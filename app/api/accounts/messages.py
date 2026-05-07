@@ -10,7 +10,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from telethon.tl.types import MessageMediaPhoto, MessageMediaDocument
 from telethon.sessions import StringSession
-from telethon import TelegramClient, functions, types
+from telethon import TelegramClient, functions, types, errors
 from app.models import TelegramAccount, User
 from app.api.auth_utils import get_current_user
 from app.client_cache import get_client, invalidate
@@ -128,6 +128,11 @@ async def get_messages(account_id: str, chat_id: str, limit: int = 50, offset_id
             messages.append(await extract_message_data(m, read_outbox_max_id))
 
         return messages
+    except errors.AuthKeyUnregisteredError:
+        logging.error(f"Session for account {account_id} has been revoked or expired.")
+        account.status = "offline"
+        await account.save()
+        raise HTTPException(status_code=401, detail="Telegram session expired. Please re-connect.")
     except Exception as e:
         logger.error(f"Error fetching messages: {e}")
         raise HTTPException(status_code=500, detail=str(e))

@@ -130,8 +130,10 @@ class ActiveDistribution:
                                     ))
                                     batch_found += 1
                                     acc.contact_count += 1
+                                    identifier = npc.get('username') or npc.get('tg_id') or "Unknown"
+                                    await self.add_log("info", {"phone": acc.phone_number, "message": f"✅ Successfully added: {identifier}"})
                             except Exception as e:
-                                await self.add_log("warning", {"phone": acc.phone_number, "message": f"Single Add Error: {str(e)}"})
+                                pass
 
                         if batch_found > 0:
                             acc_added += batch_found
@@ -558,6 +560,70 @@ async def refresh_contacts_overview(current_user: User = Depends(get_current_use
             })
             
     return {"status": "success", "synced": results}
+    
+@router.get("/sync-all-stream")
+async def sync_all_stream(token: str):
+    """Sequential SSE-based sync to avoid server overload with many accounts."""
+    from app.api.auth_utils import get_user_from_token
+    from app.client_cache import invalidate, _cache
+    
+    user = await get_user_from_token(token)
+    if not user:
+        async def err(): yield {"event": "error", "data": json.dumps({"message": "Invalid token"})}
+        return EventSourceResponse(err())
+    
+    async def event_generator():
+        accounts = await TelegramAccount.find(
+            TelegramAccount.user_id == str(user.id),
+            TelegramAccount.is_active == True
+        ).to_list()
+        
+        total = len(accounts)
+        yield {"event": "start", "data": json.dumps({"total": total})}
+        
+        for i, acc in enumerate(accounts):
+            try:
+                # Check if already in memory before we start
+                was_hot = str(acc.id) in _cache
+                
+                client = await get_client(
+                    str(acc.id), acc.session_string, acc.api_id, acc.api_hash,
+                    device_model=getattr(acc, "device_model", "Telegram Android")
+                )
+                res = await client(GetContactsRequest(hash=0))
+                
+                # Update DB
+                acc.contact_count = len(res.users)
+                acc.last_sync_date = datetime.utcnow()
+                await acc.save()
+                
+                yield {"event": "progress", "data": json.dumps({
+                    "index": i + 1,
+                    "total": total,
+                    "phone": acc.phone_number,
+                    "count": acc.contact_count,
+                    "status": "success"
+                })}
+                
+                # RAM Optimization: If it wasn't hot before, clear it now
+                if not was_hot:
+                    await invalidate(str(acc.id))
+                    
+            except Exception as e:
+                yield {"event": "progress", "data": json.dumps({
+                    "index": i + 1,
+                    "total": total,
+                    "phone": acc.phone_number,
+                    "error": str(e),
+                    "status": "error"
+                })}
+            
+            # Sequence delay to avoid overloading
+            await asyncio.sleep(0.8)
+            
+        yield {"event": "done", "data": json.dumps({"message": "Sync completed"})}
+        
+    return EventSourceResponse(event_generator())
 
 @router.get("/{account_id}")
 async def get_contacts(account_id: str, current_user: User = Depends(get_current_user)):

@@ -15,14 +15,25 @@ router = APIRouter()
 async def get_stats(current_user: User = Depends(get_current_user)):
     """Returns rule count and active auto-reply account count for the current user."""
     rule_count = await AutoReplyRule.find(AutoReplyRule.user_id == str(current_user.id)).count()
-    active_accounts_count = await AutoReplySettings.find(
+    
+    active_settings = await AutoReplySettings.find(
         AutoReplySettings.user_id == str(current_user.id),
         AutoReplySettings.is_enabled == True
-    ).count()
+    ).to_list()
+    
+    active_account_ids = [ObjectId(s.account_id) for s in active_settings]
+    
+    active_phones = []
+    if active_account_ids:
+        accounts = await TelegramAccount.find(
+            {"_id": {"$in": active_account_ids}}
+        ).to_list()
+        active_phones = [a.phone_number for a in accounts]
     
     return {
         "rule_count": rule_count,
-        "active_accounts_count": active_accounts_count
+        "active_accounts_count": len(active_settings),
+        "active_phones": active_phones
     }
 
 @router.get("/settings/{account_id}")

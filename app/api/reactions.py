@@ -25,12 +25,25 @@ async def get_reaction_stats(user=Depends(get_current_user)):
     from app.models.plan import Plan
     from bson import ObjectId
     
-    current_tasks = await ReactionTask.find(
+    active_tasks = await ReactionTask.find(
         ReactionTask.user_id == str(user.id), 
         ReactionTask.status != "cancelled", 
         ReactionTask.status != "done"
-    ).count()
+    ).to_list()
     
+    active_account_ids = []
+    for t in active_tasks:
+        active_account_ids.extend([ObjectId(aid) for aid in t.account_ids if aid])
+    
+    active_account_ids = list(set(active_account_ids))
+    
+    active_phones = []
+    if active_account_ids:
+        accounts = await TelegramAccount.find(
+            {"_id": {"$in": active_account_ids}}
+        ).to_list()
+        active_phones = [a.phone_number for a in accounts]
+
     limit = 0
     if user.plan_id:
         plan = await Plan.get(ObjectId(user.plan_id))
@@ -38,8 +51,10 @@ async def get_reaction_stats(user=Depends(get_current_user)):
             limit = plan.max_reaction_channels
             
     return {
-        "used": current_tasks,
-        "limit": limit
+        "used": len(active_tasks),
+        "limit": limit,
+        "active_phones": active_phones,
+        "active_accounts_count": len(active_account_ids)
     }
 
 @router.post("/start")
