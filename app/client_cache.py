@@ -97,6 +97,11 @@ async def get_cached_client(account_id: str) -> Optional[TelegramClient]:
     """Return the client ONLY if it is already in the cache. Does NOT connect."""
     return _cache.get(account_id)
 
+def touch(account_id: str):
+    """Update the last used timestamp for an account to prevent pruning."""
+    _last_used[account_id] = datetime.now(timezone.utc)
+
+
 async def get_client(
     account_id: str,
     session_string: str = None,

@@ -301,6 +301,14 @@ class ActiveMessageCampaign:
                     await self.add_log("log", f"⏳ {acc_task['phone']} sending to {target}...", "INFO")
                     
                     try:
+                        # ── Connection Guard ──
+                        from app.client_cache import touch
+                        touch(acc_task["acc_id"])
+                        
+                        if not acc_task["client"].is_connected():
+                            await self.add_log("log", f"🔄 {acc_task['phone']} disconnected. Reconnecting...", "WARNING")
+                            acc_task["client"] = await get_client(acc_task["acc_id"])
+
                         await acc_task["client"].send_message(target, message_to_send)
                         
                         # ── Success Lifecycle ──────────────────────────────────

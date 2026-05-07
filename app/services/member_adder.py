@@ -380,6 +380,14 @@ class ActiveMemberAdder:
                     await self.add_log("log", f"⏳ {acc_task['phone']} → {id_label}...", "INFO")
 
                     try:
+                        # ── Connection Guard ──
+                        from app.client_cache import touch
+                        touch(acc_task["acc_id"])
+                        
+                        if not acc_task["client"].is_connected():
+                            await self.add_log("log", f"🔄 {acc_task['phone']} disconnected. Reconnecting...", "WARNING")
+                            acc_task["client"] = await get_client(acc_task["acc_id"])
+
                         # Resolve the entity first so Telethon knows what type it is
                         resolved = await acc_task["client"].get_input_entity(user_input)
                         await acc_task["client"](functions.channels.InviteToChannelRequest(
