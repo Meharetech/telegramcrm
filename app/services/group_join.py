@@ -16,8 +16,10 @@ logger = logging.getLogger(__name__)
 GROUP_JOIN_TASKS: Dict[str, Dict[str, 'ActiveGroupJoiner']] = {}
 
 class ActiveGroupJoiner:
-    def __init__(self, user_id: str, account_id: str, phone_number: str, links: List[str], interval: int):
+    def __init__(self, user_id: str, account_id: str, phone_number: str, links: List[str], interval: int, batch_id: str = None, task_type: str = "join"):
         self.user_id = user_id
+        self.batch_id = batch_id
+        self.task_type = task_type
         self.account_id = account_id
         self.phone_number = phone_number
         self.links = links
@@ -56,10 +58,12 @@ class ActiveGroupJoiner:
             if not self.job_id:
                 job = GroupJoinJob(
                     user_id=self.user_id,
+                    batch_id=self.batch_id,
                     account_id=self.account_id,
                     phone_number=self.phone_number,
                     links=self.links,
                     interval=self.interval,
+                    task_type=self.task_type,
                     status=self.status,
                     total_count=self.total_count,
                     done_count=self.done_count,
@@ -80,7 +84,8 @@ class ActiveGroupJoiner:
 
     async def run(self):
         try:
-            await self.add_log("status", f"🚀 Starting Group Joiner for {self.total_count} links...")
+            verb = "Starting" if self.task_type == "join" else "Leaving"
+            await self.add_log("status", f"🚀 {verb} process for {self.total_count} groups...")
             
             acc = await TelegramAccount.get(ObjectId(self.account_id))
             if not acc or not acc.is_active:
@@ -96,32 +101,40 @@ class ActiveGroupJoiner:
                 if not clean_link: continue
 
                 try:
-                    await self.add_log("log", f"⏳ Attempting to join: {clean_link}...", "INFO")
+                    verb_ing = "joining" if self.task_type == "join" else "leaving"
+                    await self.add_log("log", f"⏳ Attempting to {verb_ing.replace('ing', '')}: {clean_link}...", "INFO")
                     
                     # Ensure client is connected
                     if not client.is_connected():
                         await client.connect()
                     
-                    # Join logic with timeout
+                    # Join/Leave logic with timeout
                     from telethon.tl.functions.messages import ImportChatInviteRequest
-                    from telethon.tl.functions.channels import JoinChannelRequest
+                    from telethon.tl.functions.channels import JoinChannelRequest, LeaveChannelRequest
                     
                     try:
-                        if "joinchat/" in link or "+" in link:
-                            hash_code = link.split("/")[-1].replace("+", "").replace("https://t.me/", "").replace("t.me/", "")
-                            await asyncio.wait_for(client(ImportChatInviteRequest(hash_code)), timeout=30)
+                        if self.task_type == "join":
+                            if "joinchat/" in link or "+" in link:
+                                hash_code = link.split("/")[-1].replace("+", "").replace("https://t.me/", "").replace("t.me/", "")
+                                await asyncio.wait_for(client(ImportChatInviteRequest(hash_code)), timeout=30)
+                            else:
+                                await asyncio.wait_for(client(JoinChannelRequest(clean_link)), timeout=30)
+                            await self.add_log("progress", f"✅ Joined: {clean_link}", "SUCCESS", data={"done": self.done_count + 1, "total": self.total_count})
                         else:
-                            await asyncio.wait_for(client(JoinChannelRequest(clean_link)), timeout=30)
+                            # Leave Logic
+                            await asyncio.wait_for(client(LeaveChannelRequest(clean_link)), timeout=30)
+                            await self.add_log("progress", f"✅ Left: {clean_link}", "SUCCESS", data={"done": self.done_count + 1, "total": self.total_count})
                         
                         self.done_count += 1
-                        await self.add_log("progress", f"✅ Joined: {clean_link}", "SUCCESS", data={"done": self.done_count, "total": self.total_count})
                     except asyncio.TimeoutError:
-                        await self.add_log("log", f"⚠️ Timeout joining {clean_link}. Skipping...", "WARNING")
+                        verb_ed = "joining" if self.task_type == "join" else "leaving"
+                        await self.add_log("log", f"⚠️ Timeout {verb_ed} {clean_link}. Skipping...", "WARNING")
                     
                     if self.done_count < self.total_count:
-                        # Randomize interval slightly (+/- 15s)
-                        wait_sec = (self.interval * 60) + random.randint(-15, 15)
-                        wait_sec = max(20, wait_sec)
+                        # Randomize interval slightly (+/- 5s if > 10s)
+                        jitter = random.randint(-5, 5) if self.interval > 10 else 0
+                        wait_sec = self.interval + jitter
+                        wait_sec = max(5, wait_sec)
                         await self.add_log("log", f"💤 Delay: {wait_sec}s until next link...", "INFO")
                         for _ in range(wait_sec):
                             if self.stop_requested: break

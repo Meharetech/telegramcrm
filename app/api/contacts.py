@@ -81,7 +81,9 @@ class ActiveDistribution:
 
                     while acc_added < target_for_this_acc and contact_pool:
                         batch = []
-                        while len(batch) < 20 and contact_pool:
+                        # Corrected: ensure batch size doesn't exceed 20 AND doesn't exceed the remaining count needed for this account
+                        remaining_for_acc = target_for_this_acc - acc_added
+                        while len(batch) < min(20, remaining_for_acc) and contact_pool:
                             batch.append(contact_pool.pop(0))
                         
                         if not batch: break
@@ -115,10 +117,22 @@ class ActiveDistribution:
                         for npc in non_phone_batch:
                             try:
                                 target_user = None
-                                if npc.get("tg_id") and npc.get("access_hash"):
+                                identifier = npc.get('username') or npc.get('tg_id') or "Unknown"
+                                
+                                if npc.get("username"):
+                                    # Fix: Use get_input_entity to resolve username properly
+                                    try:
+                                        target_user = await client.get_input_entity(npc["username"])
+                                    except Exception:
+                                        # Fallback to deep search
+                                        try:
+                                            ent = await client.get_entity(npc["username"])
+                                            target_user = await client.get_input_entity(ent)
+                                        except Exception:
+                                            await self.add_log("warning", {"phone": acc.phone_number, "message": f"⚠️ Could not find user: {identifier}"})
+                                            continue
+                                elif npc.get("tg_id") and npc.get("access_hash"):
                                     target_user = InputPeerUser(int(npc["tg_id"]), int(npc["access_hash"]))
-                                elif npc.get("username"):
-                                    target_user = npc["username"]
                                 
                                 if target_user:
                                     await client(AddContactRequest(
@@ -130,7 +144,6 @@ class ActiveDistribution:
                                     ))
                                     batch_found += 1
                                     acc.contact_count += 1
-                                    identifier = npc.get('username') or npc.get('tg_id') or "Unknown"
                                     await self.add_log("info", {"phone": acc.phone_number, "message": f"✅ Successfully added: {identifier}"})
                             except Exception as e:
                                 pass

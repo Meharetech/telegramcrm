@@ -102,11 +102,28 @@ async def check_plan_limit(user: User, field: str, current_count: Optional[int] 
         "can_auto_reply": settings.demo_can_auto_reply,
         "can_forward": settings.demo_can_forward,
         "can_react": settings.demo_can_react,
-        "access_connect": True
+        "access_connect": True,
+        "access_group_joiner": True,
+        "access_member_adding": True
     }
 
     is_demo = False
-    if not user.plan_id:
+    
+    # ── Trial Period Logic ──
+    is_in_trial = False
+    if not user.trial_started_at:
+        from datetime import timezone
+        user.trial_started_at = datetime.now(timezone.utc)
+        await user.save()
+        is_in_trial = True
+    else:
+        from datetime import timezone
+        now = datetime.now(timezone.utc)
+        start = user.trial_started_at.replace(tzinfo=timezone.utc) if user.trial_started_at.tzinfo is None else user.trial_started_at
+        if (now - start).days < 7:
+            is_in_trial = True
+
+    if not user.plan_id or is_in_trial:
         is_demo = True
     else:
         # Check for expiry
@@ -165,7 +182,8 @@ async def check_plan_limit(user: User, field: str, current_count: Optional[int] 
         "access_contacts_manager": "contacts",
         "access_reminders": "reminders",
         "access_bot_hub": "bot_hub",
-        "max_bots": "bot_hub"
+        "max_bots": "bot_hub",
+        "access_group_joiner": "group_joiner"
     }
     
     svc_id = service_map.get(field)

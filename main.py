@@ -131,7 +131,8 @@ async def resume_background_services():
                 group_link=job.group_link,
                 account_configs=job.account_configs,
                 min_delay=job.min_delay,
-                max_delay=job.max_delay
+                max_delay=job.max_delay,
+                batch_size=job.batch_size or 2
             )
             task.job_id = str(job.id)
             task.source_type = job.source_type or "contacts"

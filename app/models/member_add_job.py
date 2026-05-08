@@ -12,6 +12,7 @@ class MemberAddJob(Document):
     errors_count: int = 0
     source_type: str = "contacts" # contacts, custom_list
     member_list: List[str] = [] # List of usernames/IDs
+    batch_size: int = 2
     
     # Store the account-specific progress/configs
     # Config for reconstruction

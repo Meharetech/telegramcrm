@@ -41,6 +41,7 @@ class Plan(Document):
     access_bot_hub: bool = False           # Bot Hub Access
     access_folder_campaign: bool = False   # Folder Message Campaign
     access_folder_scraper: bool = False    # Folder Peer Scraper
+    access_group_joiner: bool = False     # Group joiner tool
 
     class Settings:
         name = "plans"

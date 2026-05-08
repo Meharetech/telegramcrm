@@ -24,6 +24,7 @@ class ScheduleRequest(BaseModel):
     is_active: bool = True
     source_type: str = "contacts"
     member_list: List[str] = []
+    batch_size: int = 2
 
 @router.get("/")
 async def get_schedules(current_user: User = Depends(get_current_user)):
@@ -50,7 +51,8 @@ async def create_or_update_schedule(req: ScheduleRequest, current_user: User = D
             max_delay=req.max_delay,
             is_active=req.is_active,
             source_type=req.source_type,
-            member_list=req.member_list
+            member_list=req.member_list,
+            batch_size=req.batch_size
         )
         await schedule.insert()
     else:
@@ -64,6 +66,7 @@ async def create_or_update_schedule(req: ScheduleRequest, current_user: User = D
         schedule.is_active = req.is_active
         schedule.source_type = req.source_type
         schedule.member_list = req.member_list
+        schedule.batch_size = req.batch_size
         schedule.updated_at = datetime.now(timezone.utc)
         await schedule.save()
     

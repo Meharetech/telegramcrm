@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends
+import asyncio
 from app.api.auth_utils import get_current_user
 from app.models import User, TelegramAccount
 from app.services.auto_reply.engine import detach_account, attach_handler
@@ -137,12 +138,11 @@ async def start_all_services(options: StartOptions, current_user: User = Depends
     if options.reaction_booster:
         from app.models.reaction import ReactionTask
         from app.services.reaction.logic import execute_reaction_boost
-        from asyncio import create_task
         tasks = await ReactionTask.find(ReactionTask.user_id == user_id, ReactionTask.status == "paused").to_list()
         for t in tasks:
             t.status = "monitoring"
             await t.save()
-            create_task(execute_reaction_boost(str(t.id)))
+            asyncio.create_task(execute_reaction_boost(str(t.id)))
             await terminal_manager.log_event(user_id, f"🚀 Reaction Booster resumed: {t.target_link}", str(t.id), "reaction", "SUCCESS")
 
     # 4. Start Bot Hub Agents
@@ -155,7 +155,6 @@ async def start_all_services(options: StartOptions, current_user: User = Depends
             await check_plan_limit(current_user, "access_bot_hub")
             enabled_bots = await BotForwarder.find(BotForwarder.user_id == user_id, BotForwarder.is_enabled == True).to_list()
             if enabled_bots:
-                import asyncio
                 import random
                 for b_idx, bot in enumerate(enabled_bots):
                     # Stagger jitter to prevent FloodWait login storm
@@ -216,7 +215,6 @@ async def start_all_services(options: StartOptions, current_user: User = Depends
             if user_id not in FOLDER_CAMPAIGN_TASKS:
                 FOLDER_CAMPAIGN_TASKS[user_id] = {}
             FOLDER_CAMPAIGN_TASKS[user_id][job.account_id] = task
-            import asyncio
             asyncio.create_task(task.run())
 
         await terminal_manager.log_event(user_id, "📂 Folder Campaign module READY and ENABLED.", "system", "folder_campaign", "SUCCESS")
@@ -241,7 +239,9 @@ async def start_all_services(options: StartOptions, current_user: User = Depends
                 account_id=job.account_id,
                 phone_number=job.phone_number,
                 links=job.links,
-                interval=job.interval
+                interval=job.interval,
+                batch_id=job.batch_id,
+                task_type=job.task_type
             )
             task.job_id = str(job.id)
             task.done_count = job.done_count

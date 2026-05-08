@@ -62,7 +62,8 @@ async def check_and_trigger_schedules():
                 group_link=schedule.destination_group,
                 account_configs=schedule.account_configs,
                 min_delay=schedule.min_delay,
-                max_delay=schedule.max_delay
+                max_delay=schedule.max_delay,
+                batch_size=schedule.batch_size or 2
             )
             task.source_type = schedule.source_type or "contacts"
             task.member_list = schedule.member_list or []

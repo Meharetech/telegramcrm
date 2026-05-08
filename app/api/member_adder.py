@@ -21,6 +21,9 @@ class MemberAddRequest(BaseModel):
     account_configs: List[AccountConfig]
     min_delay: int = 30
     max_delay: int = 60
+    batch_size: int = 2
+    source_type: str = "contacts"
+    member_list: List[str] = []
 
 @router.post("/start")
 async def start_member_adder(req: MemberAddRequest, current_user: User = Depends(get_current_user)):
@@ -53,8 +56,11 @@ async def start_member_adder(req: MemberAddRequest, current_user: User = Depends
         group_link=req.group_link,
         account_configs=req.account_configs,
         min_delay=req.min_delay,
-        max_delay=req.max_delay
+        max_delay=req.max_delay,
+        batch_size=req.batch_size
     )
+    task.source_type = req.source_type
+    task.member_list = req.member_list
     MEMBER_ADDER_TASKS[user_id] = task
     
     # Run in background
@@ -182,6 +188,7 @@ class UpdateSettingsRequest(BaseModel):
     max_flood_sleep_threshold: int
     account_limit_cap: int
     cooldown_24h: int
+    batch_size: int
 
 @router.post("/settings")
 async def update_mission_settings(req: UpdateSettingsRequest, current_user: User = Depends(get_current_user)):
@@ -194,6 +201,7 @@ async def update_mission_settings(req: UpdateSettingsRequest, current_user: User
     settings.max_flood_sleep_threshold = req.max_flood_sleep_threshold
     settings.account_limit_cap = req.account_limit_cap
     settings.cooldown_24h = req.cooldown_24h
+    settings.batch_size = req.batch_size
     
     await settings.save()
     return {"status": "success", "message": "Mission settings updated."}

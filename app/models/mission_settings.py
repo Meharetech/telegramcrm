@@ -8,6 +8,7 @@ class MemberAddSettings(Document):
     max_flood_sleep_threshold: int = 300
     account_limit_cap: int = 40
     cooldown_24h: int = 86400
+    batch_size: int = 2
 
     class Settings:
         name = "member_add_settings"

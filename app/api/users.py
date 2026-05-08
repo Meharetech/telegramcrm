@@ -166,6 +166,7 @@ async def verify_registration_otp(req: VerifyOTP):
     user.is_active = True
     user.reg_otp = None
     user.reg_otp_expiry = None
+    user.trial_started_at = datetime.now(timezone.utc)
     await user.save()
 
     return {"message": "Account verified successfully! You can now login."}
@@ -245,7 +246,8 @@ async def google_login(req: GoogleLoginRequest):
                     email=email,
                     full_name=full_name,
                     is_active=True, # Google users are pre-verified
-                    hashed_password=get_password_hash(string.ascii_letters + string.digits) # Random password
+                    hashed_password=get_password_hash(string.ascii_letters + string.digits), # Random password
+                    trial_started_at=datetime.now(timezone.utc)
                 )
                 await user.insert()
             else:

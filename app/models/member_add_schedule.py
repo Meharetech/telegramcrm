@@ -13,6 +13,7 @@ class MemberAddSchedule(Document):
     account_configs: List[Dict] = []
     source_type: str = "contacts" # contacts, custom_list
     member_list: List[str] = [] # List of usernames/IDs
+    batch_size: int = 2
     
     scheduled_time: str # "HH:MM" format (24h)
     min_delay: int = 30
