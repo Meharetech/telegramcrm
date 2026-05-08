@@ -103,11 +103,10 @@ async def get_account_chats(account_id: str, limit: int = 50, offset_date: Optio
             })
 
         return chats
-    except errors.AuthKeyUnregisteredError:
-        logging.error(f"Session for account {account_id} has been revoked or expired.")
-        account.status = "offline"
-        await account.save()
-        raise HTTPException(status_code=401, detail="Telegram session expired. Please re-connect this account.")
+    except (errors.AuthKeyUnregisteredError, errors.SessionRevokedError, errors.UserDeactivatedBanError) as e:
+        from app.api.accounts.utils import handle_account_death
+        await handle_account_death(account_id, account, reason=type(e).__name__)
+        raise HTTPException(status_code=401, detail="Telegram session revoked. This account has been automatically removed.")
     except Exception as e:
         logging.error(f"Error fetching chats: {e}")
         raise HTTPException(status_code=500, detail=str(e))

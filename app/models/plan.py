@@ -25,6 +25,7 @@ class Plan(Document):
     max_reaction_channels: int = 0  # -1 = unlimited
     max_forwarder_channels: int = 0 # -1 = unlimited
     max_bots: int = 1               # -1 = unlimited
+    max_folder_accounts: int = 1    # Number of accounts allowed to run folder campaigns
 
     # ── Feature Toggles ─────────────────────────────────────────────────────
     access_chat_message: bool = False      # Bulk/schedule message sending
@@ -38,6 +39,8 @@ class Plan(Document):
     access_reminders: bool = False         # Scheduled reminders
     access_terminal: bool = False          # Terminal access toggle
     access_bot_hub: bool = False           # Bot Hub Access
+    access_folder_campaign: bool = False   # Folder Message Campaign
+    access_folder_scraper: bool = False    # Folder Peer Scraper
 
     class Settings:
         name = "plans"

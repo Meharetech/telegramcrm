@@ -10,6 +10,14 @@ class TelegramAccount(Document):
     api_id: int
     api_hash: str
     session_string: Optional[str] = None
+    username: Optional[str] = None
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    bio: Optional[str] = None
+    birthday: Optional[str] = None
+    privacy_phone: Optional[str] = None
+    privacy_calls: Optional[str] = None
+    privacy_groups: Optional[str] = None
     device_model: Optional[str] = "Telegram Android"
     password: Optional[str] = None  # Store 2FA password if provided
     is_active: bool = True
@@ -43,7 +51,15 @@ class TelegramAccount(Document):
         id: Optional[ObjectId] = Field(None, alias="_id")
         user_id: str = "legacy_user"
         phone_number: str
+        username: Optional[str] = None
+        first_name: Optional[str] = None
+        last_name: Optional[str] = None
+        bio: Optional[str] = None
+        privacy_phone: Optional[str] = None
+        privacy_calls: Optional[str] = None
+        privacy_groups: Optional[str] = None
         status: str
+        password: Optional[str] = None
         device_model: Optional[str]
         daily_contacts_limit: int
         contacts_added_today: int

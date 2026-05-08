@@ -82,7 +82,10 @@ class PlanCreate(BaseModel):
     access_reminders: bool = False
     access_terminal: bool = False
     access_bot_hub: bool = False
+    access_folder_campaign: bool = False
+    access_folder_scraper: bool = False
     max_bots: int = 1
+    max_folder_accounts: int = 1
 
 
 class PlanUpdate(BaseModel):
@@ -109,7 +112,10 @@ class PlanUpdate(BaseModel):
     access_reminders: Optional[bool] = None
     access_terminal: Optional[bool] = None
     access_bot_hub: Optional[bool] = None
+    access_folder_campaign: Optional[bool] = None
+    access_folder_scraper: Optional[bool] = None
     max_bots: Optional[int] = None
+    max_folder_accounts: Optional[int] = None
 
 
 class AssignPlan(BaseModel):
@@ -202,7 +208,10 @@ def plan_to_dict(p: Plan) -> dict:
         "access_reminders": getattr(p, "access_reminders", False),
         "access_terminal": getattr(p, "access_terminal", False),
         "access_bot_hub": getattr(p, "access_bot_hub", False),
+        "access_folder_campaign": getattr(p, "access_folder_campaign", False),
+        "access_folder_scraper": getattr(p, "access_folder_scraper", False),
         "max_bots": getattr(p, "max_bots", 1),
+        "max_folder_accounts": getattr(p, "max_folder_accounts", 1),
     }
 
 

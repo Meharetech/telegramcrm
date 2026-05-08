@@ -27,3 +27,44 @@ def format_status(status):
     if isinstance(status, types.UserStatusLastMonth):
         return "last seen last month"
     return ""
+
+async def handle_account_death(account_id: str, account=None, reason: str = "Unknown"):
+    """
+    Centrally handle an account that has been banned, revoked, or logged out.
+    Performs full cleanup: stops background tasks, clears cache, removes from DB.
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+    
+    try:
+        from app.models import TelegramAccount
+        from app.client_cache import invalidate, _cache
+        from app.services.auto_reply.engine import detach_account
+        from app.models.auto_reply import AutoReplySettings, AutoReplyRule
+        from app.models.forwarder import ForwarderRule
+
+        if not account:
+            account = await TelegramAccount.get(account_id)
+        
+        if not account:
+            return False
+
+        logger.warning(f"[cleanup] Removing dead account {account.phone_number} ({account_id}). Reason: {reason}")
+
+        # 1. Stop background services and clear memory cache
+        active_client = _cache.get(account_id)
+        if active_client:
+            await detach_account(active_client, account_id)
+        await invalidate(account_id)
+        
+        # 2. Clean up all related settings/rules
+        await AutoReplySettings.find(AutoReplySettings.account_id == account_id).delete()
+        await AutoReplyRule.find(AutoReplyRule.account_id == account_id).delete()
+        await ForwarderRule.find(ForwarderRule.account_id == account_id).delete()
+
+        # 3. Finally remove from database
+        await account.delete()
+        return True
+    except Exception as e:
+        logger.error(f"[cleanup] Critical error during account cleanup for {account_id}: {e}")
+        return False

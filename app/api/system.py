@@ -55,6 +55,21 @@ async def stop_all_services(current_user: User = Depends(get_current_user)):
     for bot in bots:
         await stop_bot(str(bot.id))
 
+    # 5. Stop Folder Campaigns
+    from app.services.folder_campaign import FOLDER_CAMPAIGN_TASKS
+    if user_id in FOLDER_CAMPAIGN_TASKS:
+        for acc_id, task in list(FOLDER_CAMPAIGN_TASKS[user_id].items()):
+            task.stop_requested = True
+            # Mark as running in DB so resumption logic knows to pick it up later
+            # The run() loop will exit gracefully
+            
+    # 6. Stop Group Joiners
+    from app.services.group_join import GROUP_JOIN_TASKS
+    if user_id in GROUP_JOIN_TASKS:
+        for acc_id, task in list(GROUP_JOIN_TASKS[user_id].items()):
+            task.stop_requested = True
+            # Keeps status as 'running' for resumption
+
     await terminal_manager.log_event(user_id, "⏹️ GLOBAL STOP: Auto-Reply, Forwarders, Bots, and Boosters PAUSED.", "system", "system", "WARNING")
 
     # Update User session stats
@@ -77,6 +92,8 @@ class StartOptions(BaseModel):
     reaction_booster: bool = True
     reminders: bool = True
     member_adder: bool = True
+    folder_campaign: bool = True
+    group_join: bool = True
 
 @router.post("/start-all")
 async def start_all_services(options: StartOptions, current_user: User = Depends(get_current_user)):
@@ -162,6 +179,79 @@ async def start_all_services(options: StartOptions, current_user: User = Depends
         schedule = await MemberAddSchedule.find_one(MemberAddSchedule.user_id == user_id, MemberAddSchedule.is_active == True)
         if schedule:
             await terminal_manager.log_event(user_id, f"📅 Member Adding Scheduler ACTIVATED ({schedule.label}).", "system", "system", "SUCCESS")
+
+    # 7. Folder Campaign Engine Status & Resumption
+    if options.folder_campaign:
+        from app.models.folder_campaign import FolderCampaignJob
+        from app.services.folder_campaign import ActiveFolderCampaign, FOLDER_CAMPAIGN_TASKS
+        
+        # Resume any tasks that were marked as 'running' but didn't finish
+        running_folder_jobs = await FolderCampaignJob.find(
+            FolderCampaignJob.user_id == user_id, 
+            FolderCampaignJob.status == "running"
+        ).to_list()
+        
+        for job in running_folder_jobs:
+            # Check if already in memory
+            if user_id in FOLDER_CAMPAIGN_TASKS and job.account_id in FOLDER_CAMPAIGN_TASKS[user_id]:
+                continue
+                
+            await terminal_manager.log_event(user_id, f"📂 Resuming Folder Campaign: {job.folder_name} ({job.phone_number})", job.account_id, "folder_campaign", "INFO")
+            
+            task = ActiveFolderCampaign(
+                user_id=job.user_id,
+                account_id=job.account_id,
+                phone_number=job.phone_number,
+                folder_id=job.folder_id,
+                folder_name=job.folder_name,
+                selected_group_ids=job.selected_group_ids,
+                message_text=job.message_text,
+                min_delay=job.min_delay,
+                max_delay=job.max_delay,
+                repeat_interval=job.repeat_interval,
+                group_metadata=getattr(job, 'group_metadata', {})
+            )
+            task.job_id = str(job.id)
+            
+            if user_id not in FOLDER_CAMPAIGN_TASKS:
+                FOLDER_CAMPAIGN_TASKS[user_id] = {}
+            FOLDER_CAMPAIGN_TASKS[user_id][job.account_id] = task
+            import asyncio
+            asyncio.create_task(task.run())
+
+        await terminal_manager.log_event(user_id, "📂 Folder Campaign module READY and ENABLED.", "system", "folder_campaign", "SUCCESS")
+
+    # 8. Group Joiner Status & Resumption
+    if options.group_join:
+        from app.services.group_join import GroupJoinJob, ActiveGroupJoiner, GROUP_JOIN_TASKS
+        
+        running_join_jobs = await GroupJoinJob.find(
+            GroupJoinJob.user_id == user_id,
+            GroupJoinJob.status == "running"
+        ).to_list()
+        
+        for job in running_join_jobs:
+            if user_id in GROUP_JOIN_TASKS and job.account_id in GROUP_JOIN_TASKS[user_id]:
+                continue
+            
+            await terminal_manager.log_event(user_id, f"🔗 Resuming Group Joiner: {len(job.links)} links ({job.phone_number})", job.account_id, "group_join", "INFO")
+            
+            task = ActiveGroupJoiner(
+                user_id=job.user_id,
+                account_id=job.account_id,
+                phone_number=job.phone_number,
+                links=job.links,
+                interval=job.interval
+            )
+            task.job_id = str(job.id)
+            task.done_count = job.done_count
+            
+            if user_id not in GROUP_JOIN_TASKS:
+                GROUP_JOIN_TASKS[user_id] = {}
+            GROUP_JOIN_TASKS[user_id][job.account_id] = task
+            asyncio.create_task(task.run())
+            
+        await terminal_manager.log_event(user_id, "🔗 Group Joiner module READY and ENABLED.", "system", "group_join", "SUCCESS")
 
     # Update User session stats
     current_user.services_active = True

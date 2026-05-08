@@ -490,6 +490,14 @@ async def list_accounts(
             
             acc_data = {
                 "phone": a.phone_number, 
+                "username": a.username,
+                "first_name": a.first_name,
+                "last_name": a.last_name,
+                "bio": a.bio,
+                "privacy_phone": a.privacy_phone,
+                "privacy_calls": a.privacy_calls,
+                "privacy_groups": a.privacy_groups,
+                "password": a.password,
                 "status": a.status or "disconnected", 
                 "id": acc_id, 
                 "device_model": a.device_model or "Telegram Android",
@@ -592,7 +600,7 @@ async def delete_account(account_id: str, current_user: User = Depends(get_curre
 @router.post("/{account_id}/check-ban")
 async def check_ban(account_id: str, current_user: User = Depends(get_current_user)):
     from bson import ObjectId
-    from telethon.errors import AuthKeyUnregisteredError, UserDeactivatedBanError, SessionExpiredError, UserDeactivatedError
+    from telethon.errors import AuthKeyUnregisteredError, UserDeactivatedBanError, SessionExpiredError, UserDeactivatedError, SessionRevokedError
     from app.client_cache import get_client
     
     try:
@@ -614,36 +622,27 @@ async def check_ban(account_id: str, current_user: User = Depends(get_current_us
             if not client:
                 raise AuthKeyUnregisteredError(request=None)
             
-            # Simple check
-            await client.get_me()
+            # Deep check for authorization
+            me = await client.get_me()
+            is_auth = await client.is_user_authorized()
+            
+            if not me or not is_auth:
+                from app.api.accounts.utils import handle_account_death
+                await handle_account_death(account_id, acc, reason="Unauthorized/LoggedOut")
+                return {"status": "banned", "message": "Account session is invalid or logged out. Removed."}
+
             from datetime import datetime
             acc.last_check_status = "active"
             acc.last_check_time = datetime.utcnow()
             await acc.save()
             return {"status": "active", "message": "Account is active"}
             
-        except (AuthKeyUnregisteredError, UserDeactivatedBanError, SessionExpiredError, UserDeactivatedError) as e:
-            # Delete account if banned
-            from app.services.auto_reply.engine import detach_account
-            from app.client_cache import invalidate, _cache
-            
-            # Stop background services
-            active_client = _cache.get(account_id)
-            if active_client:
-                await detach_account(active_client, account_id)
-            
-            # Disconnect from memory cache
-            await invalidate(account_id)
-
-            from app.models.auto_reply import AutoReplySettings, AutoReplyRule
-            from app.models.forwarder import ForwarderRule
-            
-            await AutoReplySettings.find(AutoReplySettings.account_id == account_id).delete()
-            await AutoReplyRule.find(AutoReplyRule.account_id == account_id).delete()
-            await ForwarderRule.find(ForwarderRule.account_id == account_id).delete()
-
-            await acc.delete()
-            return {"status": "banned", "message": f"Account banned/deleted: {type(e).__name__}"}
+        except (AuthKeyUnregisteredError, UserDeactivatedBanError, SessionExpiredError, UserDeactivatedError, SessionRevokedError) as e:
+            # Centrally remove the dead account
+            from app.api.accounts.utils import handle_account_death
+            reason = type(e).__name__
+            await handle_account_death(account_id, acc, reason)
+            return {"status": "banned", "message": f"Account removed: {reason}"}
         
         except Exception as e:
             # Other errors

@@ -21,3 +21,5 @@ razorpay
 dnspython
 cryptography
 bcrypt
+faker
+httpx

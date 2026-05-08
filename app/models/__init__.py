@@ -17,3 +17,5 @@ from .system_settings import SystemSettings
 from .bot_forwarder import BotForwarder
 from .wallet_transaction import WalletTransaction
 from .shop_purchase import ShopPurchase
+from .folder_campaign import FolderCampaignJob
+from .group_join import GroupJoinJob

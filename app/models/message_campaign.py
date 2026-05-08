@@ -1,10 +1,10 @@
 from beanie import Document, Indexed
 from datetime import datetime, timezone
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Annotated
 from pydantic import Field
 
 class MessageCampaignJob(Document):
-    user_id: Indexed(str)
+    user_id: Annotated[str, Indexed()]
     status: str = "running" # running, stopped, completed, error
     method: str = "contact" # contact (existing contacts), username (username list)
     username_list: List[str] = []
@@ -31,7 +31,7 @@ class MessageCampaignJob(Document):
         indexes = ["user_id", "status", "created_at"]
 
 class MessageCampaignSchedule(Document):
-    user_id: Indexed(str)
+    user_id: Annotated[str, Indexed()]
     method: str = "contact"
     username_list: List[str] = []
     message_text: str = ""

@@ -5,6 +5,7 @@ from .messages import router as messages_router
 from .profile import router as profile_router
 from .scrape import router as scrape_router
 from .creative import router as creative_router
+from .two_factor import router as two_factor_router
 
 router = APIRouter()
 
@@ -15,3 +16,4 @@ router.include_router(messages_router)
 router.include_router(profile_router)
 router.include_router(scrape_router)
 router.include_router(creative_router)
+router.include_router(two_factor_router)

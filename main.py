@@ -15,6 +15,8 @@ from app.models import (
     WalletTransaction, ShopPurchase
 )
 from app.models.auto_reply import AutoReplyRule, AutoReplySettings
+from app.models.folder_campaign import FolderCampaignJob
+from app.models.group_join import GroupJoinJob
 from app.api.accounts import router as account_router
 from app.api.auto_reply import router as auto_reply_router
 from app.api.forwarder import router as forwarder_router
@@ -27,6 +29,7 @@ from app.api.bot_forwarder import router as bot_forwarder_router
 from app.api.wallet import router as wallet_router
 from app.api.shop import router as shop_router
 from app.api.accounts.otp_viewer import router as otp_viewer_router
+from app.api.folder_campaign import router as folder_campaign_router
 from contextlib import asynccontextmanager
 from app.client_cache import shutdown_all, start_maintenance
 from app.config import settings
@@ -42,6 +45,22 @@ if os.name != 'nt': # Only on Linux/Ubuntu
         logging.getLogger(__name__).info("[perf] uvloop event loop policy installed.")
     except ImportError:
         pass # Handle in main logger below
+else:
+    # ── WINDOWS SPECIFIC PATCH ──
+    # This silences the "ConnectionResetError: [WinError 10054]" traceback 
+    # that happens in asyncio/proactor_events.py when a client closes a connection.
+    from asyncio import proactor_events
+    _old_call_connection_lost = proactor_events._ProactorBasePipeTransport._call_connection_lost
+
+    def _patched_call_connection_lost(self, exc):
+        try:
+            _old_call_connection_lost(self, exc)
+        except (ConnectionResetError, BrokenPipeError):
+            # Suppress noisy reset errors on Windows
+            pass
+
+    proactor_events._ProactorBasePipeTransport._call_connection_lost = _patched_call_connection_lost
+    logging.getLogger(__name__).info("[patch] Applied Windows asyncio/proactor log fix.")
 
 logger = logging.getLogger(__name__)
 
@@ -138,6 +157,31 @@ async def resume_background_services():
             task.job_id = str(job.id)
             MESSAGE_CAMPAIGN_TASKS[job.user_id] = task
             asyncio.create_task(task.run())
+
+    # 5. Resume Folder Campaigns
+    from app.models.folder_campaign import FolderCampaignJob
+    from app.services.folder_campaign import ActiveFolderCampaign, FOLDER_CAMPAIGN_TASKS
+    active_folder_jobs = await FolderCampaignJob.find(FolderCampaignJob.status == "running").to_list()
+    for job in active_folder_jobs:
+        if await is_user_active(job.user_id):
+            logger.info(f"[startup] Resuming FolderCampaignJob for user {job.user_id} account {job.account_id}")
+            task = ActiveFolderCampaign(
+                user_id=job.user_id,
+                account_id=job.account_id,
+                phone_number=job.phone_number,
+                folder_id=job.folder_id,
+                folder_name=job.folder_name,
+                selected_group_ids=job.selected_group_ids,
+                message_text=job.message_text,
+                min_delay=job.min_delay,
+                max_delay=job.max_delay,
+                repeat_interval=job.repeat_interval
+            )
+            task.job_id = str(job.id)
+            if job.user_id not in FOLDER_CAMPAIGN_TASKS:
+                FOLDER_CAMPAIGN_TASKS[job.user_id] = {}
+            FOLDER_CAMPAIGN_TASKS[job.user_id][job.account_id] = task
+            asyncio.create_task(task.run())
     
     all_resumes = auto_tasks + fwd_tasks
     if all_resumes:
@@ -187,7 +231,7 @@ async def lifespan(app: FastAPI):
                 User, TelegramAccount, AutoReplyRule, AutoReplySettings,
                 ForwarderRule, TelegramAPI, ReactionTask, Reminder, Proxy, SystemLog,
                 MemberAddSettings, MemberAddJob, MemberAddSchedule, MessageCampaignJob, MessageCampaignSchedule, Plan, Payment,
-                SystemSettings, BotForwarder, WalletTransaction, ShopPurchase
+                SystemSettings, BotForwarder, WalletTransaction, ShopPurchase, FolderCampaignJob, GroupJoinJob
             ]
         )
 
@@ -267,6 +311,7 @@ from app.api.system import router as system_router
 from app.api.member_adder import router as member_adder_router
 from app.api.member_add_schedule import router as member_add_schedule_router
 from app.api.message_campaign import router as message_campaign_router
+from app.api.group_join import router as group_join_router
 
 app.include_router(account_router,    prefix="/api/accounts",    tags=["Accounts"])
 app.include_router(auto_reply_router, prefix="/api/auto-reply",  tags=["AutoReply"])
@@ -286,6 +331,8 @@ app.include_router(message_campaign_router, prefix="/api/message-campaign", tags
 app.include_router(wallet_router, prefix="/api/wallet", tags=["Wallet"])
 app.include_router(shop_router, prefix="/api/shop", tags=["Shop"])
 app.include_router(otp_viewer_router, prefix="/api/otp", tags=["OTP Viewer"])
+app.include_router(folder_campaign_router, prefix="/api/folder-campaign", tags=["Folder Campaign"])
+app.include_router(group_join_router, prefix="/api/group-join", tags=["Group Joiner"])
 app.include_router(ws_router,         prefix="/api",             tags=["WebSockets"])
 
 @app.get("/")
