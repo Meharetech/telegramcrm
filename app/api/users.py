@@ -2,11 +2,12 @@ from fastapi import APIRouter, HTTPException, Depends, status, Request
 from pydantic import BaseModel, EmailStr
 from app.models import (
     User, TelegramAPI, TelegramAccount, Proxy, 
-    ReactionTask, AutoReplyRule, ForwarderRule, Reminder
+    ReactionTask, AutoReplyRule, ForwarderRule, Reminder, SystemSettings
 )
 from app.api.auth_utils import get_password_hash, verify_password, create_access_token, get_current_user
 from typing import Optional
 import re
+import os
 
 # --- RATE LIMITER ---
 from slowapi import Limiter
@@ -15,10 +16,15 @@ limiter = Limiter(key_func=get_remote_address)
 
 import random
 import string
+import httpx
 from datetime import datetime, timedelta, timezone
 from app.services.email_service import send_otp_email, send_registration_otp_email
+from app.config import settings
 
 router = APIRouter()
+
+class GoogleLoginRequest(BaseModel):
+    id_token: str
 
 class ForgotPasswordRequest(BaseModel):
     email: EmailStr
@@ -198,6 +204,72 @@ async def login(req: UserLogin, request: Request):
             "is_admin": user.is_admin
         }
     }
+
+@router.post("/google-login", response_model=Token)
+async def google_login(req: GoogleLoginRequest):
+    # Verify ID token with Firebase Identity Toolkit
+    # This is more reliable for Firebase ID tokens than standard Google tokeninfo
+    firebase_api_key = settings.FIREBASE_API_KEY
+    if not firebase_api_key:
+        raise HTTPException(status_code=500, detail="Firebase API Key not configured on server")
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                f"https://identitytoolkit.googleapis.com/v1/accounts:lookup?key={firebase_api_key}",
+                json={"idToken": req.id_token}
+            )
+            
+            if resp.status_code != 200:
+                # Log the error for debugging
+                error_data = resp.json()
+                print(f"Firebase verification failed: {error_data}")
+                raise HTTPException(status_code=401, detail="Invalid Google/Firebase token")
+            
+            data = resp.json()
+            users_list = data.get("users", [])
+            if not users_list:
+                raise HTTPException(status_code=401, detail="User not found in Google account")
+            
+            google_user = users_list[0]
+            email = google_user.get("email")
+            full_name = google_user.get("displayName")
+            
+            if not email:
+                raise HTTPException(status_code=400, detail="Google account has no email")
+            
+            # Check if user exists
+            user = await User.find_one(User.email == email)
+            if not user:
+                # Create new user via Google
+                user = User(
+                    email=email,
+                    full_name=full_name,
+                    is_active=True, # Google users are pre-verified
+                    hashed_password=get_password_hash(string.ascii_letters + string.digits) # Random password
+                )
+                await user.insert()
+            else:
+                # Ensure account is active if they previously registered but didn't verify
+                if not user.is_active:
+                    user.is_active = True
+                    await user.save()
+
+            # Issue token
+            access_token = create_access_token(data={"sub": str(user.id)})
+            return {
+                "access_token": access_token,
+                "token_type": "bearer",
+                "user": {
+                    "id": str(user.id),
+                    "email": user.email,
+                    "phone": user.phone,
+                    "full_name": user.full_name,
+                    "is_admin": user.is_admin
+                }
+            }
+    except Exception as e:
+        if isinstance(e, HTTPException): raise e
+        raise HTTPException(status_code=401, detail=f"Google authentication failed: {str(e)}")
 
 @router.post("/admin/login", response_model=Token)
 async def admin_login(req: UserLogin):
@@ -487,11 +559,23 @@ class UserAPISettings(BaseModel):
 
 @router.get("/profile")
 async def get_profile(current_user: User = Depends(get_current_user)):
-    from app.models import Plan
+    from app.models import Plan, TelegramAccount, Proxy, TelegramAPI
     from bson import ObjectId
+    from datetime import datetime, timezone
     
+    # 1. Fetch Current Counts
+    acc_count = await TelegramAccount.find(TelegramAccount.user_id == str(current_user.id)).count()
+    proxy_count = await Proxy.find(Proxy.user_id == str(current_user.id)).count()
+    api_count = await TelegramAPI.find(TelegramAPI.user_id == str(current_user.id)).count()
+
     plan_details = None
-    if current_user.plan_id:
+    is_expired = False
+    if current_user.plan_expiry_at:
+        now = datetime.now(timezone.utc)
+        expiry = current_user.plan_expiry_at.replace(tzinfo=timezone.utc) if current_user.plan_expiry_at.tzinfo is None else current_user.plan_expiry_at
+        is_expired = now > expiry
+
+    if current_user.plan_id and not is_expired:
         try:
             plan = await Plan.get(ObjectId(current_user.plan_id))
             if plan:
@@ -501,12 +585,33 @@ async def get_profile(current_user: User = Depends(get_current_user)):
                     "price_inr": plan.price_inr,
                     "max_accounts": plan.max_accounts,
                     "max_api_keys": plan.max_api_keys,
+                    "max_proxies": getattr(plan, 'max_proxies', 10),
                     "daily_contacts_limit": getattr(plan, 'daily_contacts_limit', 50),
                     "can_auto_reply": getattr(plan, 'can_auto_reply', False),
                     "can_forward": getattr(plan, 'can_forward', False),
                     "can_react": getattr(plan, 'can_react', False)
                 }
         except: pass
+    
+    # 2. Fallback to Demo Plan details if no plan or expired
+    if not plan_details:
+        settings = await SystemSettings.find_one()
+        if not settings:
+            settings = SystemSettings()
+
+        plan_details = {
+            "id": "demo",
+            "name": "Demo / Free Tier",
+            "price_inr": 0,
+            "max_accounts": settings.demo_max_accounts,
+            "max_proxies": settings.demo_max_proxies,
+            "max_api_keys": settings.demo_max_api_keys,
+            "daily_contacts_limit": settings.demo_daily_contacts_limit,
+            "can_auto_reply": settings.demo_can_auto_reply,
+            "can_forward": settings.demo_can_forward,
+            "can_react": settings.demo_can_react,
+            "is_demo": True
+        }
 
     return {
         "id": str(current_user.id),
@@ -518,7 +623,12 @@ async def get_profile(current_user: User = Depends(get_current_user)):
         "plan": plan_details,
         "plan_expiry_at": current_user.plan_expiry_at.isoformat() if current_user.plan_expiry_at else None,
         "billing_cycle": current_user.billing_cycle,
-        "wallet_balance": current_user.wallet_balance
+        "wallet_balance": current_user.wallet_balance,
+        "resource_counts": {
+            "accounts": acc_count,
+            "proxies": proxy_count,
+            "apis": api_count
+        }
     }
 
 @router.get("/settings")

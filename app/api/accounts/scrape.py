@@ -539,6 +539,8 @@ async def scrape_live_stream_participants(
                 me = await client.get_me()
                 # Some groups require a non-zero SSRC to avoid the "retry with new SSRC" error
                 ssrc = random.randint(1, 0x7fffffff)
+                
+                # Check if we are already in the call to avoid errors
                 await client(JoinGroupCallRequest(
                     call=call,
                     join_as=me,
@@ -548,84 +550,110 @@ async def scrape_live_stream_participants(
                 ))
                 logging.info(f"Account {account_id} joined live stream in {group_id} with SSRC {ssrc}")
             except Exception as e:
-                logging.warning(f"Could not join live stream: {e}")
+                logging.warning(f"Could not join live stream (might already be in): {e}")
 
             # 2. Scrape the participants
-            participants_res = await client(GetGroupParticipantsRequest(
-                call=call, 
-                ids=[], 
-                sources=[], 
-                offset='', 
-                limit=1000
-            ))
-            
-            # Map users for easy access
-            user_map = {u.id: u for u in participants_res.users}
+            # We fetch in a loop if there are more than 100 participants
+            total_count = 0
+            offset = ''
+            seen_ids = set()
+            pending_members = []
+            stats = {
+                "total": 0, "online": 0, "recently": 0,
+                "not_active": 0, "with_username": 0, "without_username": 0
+            }
 
-            for p in participants_res.participants:
-                # p.peer can be PeerUser, PeerChat, PeerChannel
-                from telethon.tl.types import PeerUser
-                if not isinstance(p.peer, PeerUser):
-                    continue
+            while True:
+                participants_res = await client(GetGroupParticipantsRequest(
+                    call=call, 
+                    ids=[], 
+                    sources=[], 
+                    offset=offset, 
+                    limit=100
+                ))
                 
-                user_entity = user_map.get(p.peer.user_id)
-                if not user_entity:
-                    continue
+                if not participants_res.participants:
+                    break
+                    
+                # Map entities for easy access
+                entity_map = {u.id: u for u in participants_res.users}
+                for c in participants_res.chats:
+                    entity_map[c.id] = c
 
-                member_id = user_entity.id
-                if member_id in seen_ids:
-                    continue
-                seen_ids.add(member_id)
+                for p in participants_res.participants:
+                    # Resolve peer ID
+                    peer_id = None
+                    if hasattr(p.peer, 'user_id'): peer_id = p.peer.user_id
+                    elif hasattr(p.peer, 'channel_id'): peer_id = p.peer.channel_id
+                    elif hasattr(p.peer, 'chat_id'): peer_id = p.peer.chat_id
+                    
+                    if not peer_id or peer_id in seen_ids:
+                        continue
+                    seen_ids.add(peer_id)
 
-                total_count += 1
-                if account_id in ACTIVE_SCRAPES:
-                    ACTIVE_SCRAPES[account_id]["total"] = total_count
+                    user_entity = entity_map.get(peer_id)
+                    if not user_entity:
+                        # Fallback: try fetching if not in map
+                        try:
+                            user_entity = await client.get_entity(p.peer)
+                        except: continue
 
-                # Stats & Formatting
-                last_seen = getattr(user_entity, 'status', None)
-                status_label = "Live" # They are in a live stream!
-                if isinstance(last_seen, UserStatusOnline):
-                    stats["online"] += 1
-                elif isinstance(last_seen, UserStatusRecently):
-                    stats["recently"] += 1
-                else:
-                    stats["not_active"] += 1
+                    total_count += 1
+                    if account_id in ACTIVE_SCRAPES:
+                        ACTIVE_SCRAPES[account_id]["total"] = total_count
 
-                if user_entity.username: stats["with_username"] += 1
-                else: stats["without_username"] += 1
-                stats["total"] = total_count
+                    # Determine status and basic info
+                    is_user = isinstance(user_entity, User)
+                    status_label = "Live"
+                    
+                    if is_user:
+                        last_seen = getattr(user_entity, 'status', None)
+                        if isinstance(last_seen, UserStatusOnline): stats["online"] += 1
+                        elif isinstance(last_seen, UserStatusRecently): stats["recently"] += 1
+                        else: stats["not_active"] += 1
+                        
+                        if user_entity.username: stats["with_username"] += 1
+                        else: stats["without_username"] += 1
+                    else:
+                        # For channels/chats joining the stream
+                        stats["with_username"] += 1 if getattr(user_entity, 'username', None) else 0
+                        stats["online"] += 1
 
-                member_data = {
-                    "id": str(member_id),
-                    "access_hash": str(getattr(user_entity, 'access_hash', '')),
-                    "first_name": user_entity.first_name or "",
-                    "last_name": user_entity.last_name or "",
-                    "username": user_entity.username or "",
-                    "phone": getattr(user_entity, 'phone', "") or "",
-                    "status_label": status_label,
-                    "is_bot": bool(getattr(user_entity, 'bot', False)),
-                    "is_premium": bool(getattr(user_entity, 'premium', False)),
-                    "is_verified": bool(getattr(user_entity, 'verified', False)),
-                    "is_scam": bool(getattr(user_entity, 'scam', False)),
-                    "is_fake": bool(getattr(user_entity, 'fake', False)),
-                    "has_photo": bool(getattr(user_entity, 'photo', None)),
-                }
-                pending_members.append(member_data)
-                
-                if len(pending_members) >= 5:
-                    yield {
-                        "event": "update",
-                        "data": json.dumps({"stats": stats, "members": pending_members})
+                    stats["total"] = total_count
+
+                    member_data = {
+                        "id": str(peer_id),
+                        "access_hash": str(getattr(user_entity, 'access_hash', '')),
+                        "first_name": getattr(user_entity, 'first_name', '') or getattr(user_entity, 'title', 'Unknown'),
+                        "last_name": getattr(user_entity, 'last_name', '') or "",
+                        "username": getattr(user_entity, 'username', '') or "",
+                        "phone": getattr(user_entity, 'phone', '') or "",
+                        "status_label": status_label,
+                        "is_bot": bool(getattr(user_entity, 'bot', False)),
+                        "is_premium": bool(getattr(user_entity, 'premium', False)),
+                        "is_verified": bool(getattr(user_entity, 'verified', False)),
+                        "is_scam": bool(getattr(user_entity, 'scam', False)),
+                        "is_fake": bool(getattr(user_entity, 'fake', False)),
+                        "has_photo": bool(getattr(user_entity, 'photo', None)),
                     }
-                    pending_members = []
+                    pending_members.append(member_data)
+                    
+                    if len(pending_members) >= 5:
+                        yield {
+                            "event": "update",
+                            "data": json.dumps({"stats": stats, "members": pending_members})
+                        }
+                        pending_members = []
+                        await asyncio.sleep(0.01)
+
+                if not participants_res.next_offset:
+                    break
+                offset = participants_res.next_offset
 
             # 3. Leave the meeting
             try:
-                # Using 0 as source is often accepted for a generic leave
                 await client(LeaveGroupCallRequest(call=call, source=0))
-                logging.info(f"Account {account_id} left live stream in {group_id}")
-            except Exception as e:
-                logging.warning(f"Error leaving live stream: {e}")
+            except: pass
 
             # Final cleanup
             if account_id in ACTIVE_SCRAPES:

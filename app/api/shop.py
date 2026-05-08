@@ -60,13 +60,14 @@ async def list_accounts_for_sale(current_user: User = Depends(get_current_user))
         "accounts": result,
         "settings": {
             "price": shop_settings.shop_account_price,
+            "direct_price": shop_settings.shop_account_price,
             "timeout_mins": shop_settings.shop_otp_timeout_mins
         }
     }
 
 @router.post("/purchase-random")
-async def buy_random_account(current_user: User = Depends(get_current_user)):
-    print(f"DEBUG: buy_random_account called by {current_user.id}")
+async def buy_random_account(type: str = "otp", current_user: User = Depends(get_current_user)):
+    print(f"DEBUG: buy_random_account called by {current_user.id} type={type}")
     # 1. Identify locked accounts
     shop_settings = await get_shop_settings()
     timeout_mins = shop_settings.shop_otp_timeout_mins
@@ -75,13 +76,15 @@ async def buy_random_account(current_user: User = Depends(get_current_user)):
     three_mins_ago = datetime.now(timezone.utc) - timedelta(minutes=timeout_mins)
 
     # 0. Anti-Spam: Check if user already has a pending purchase
-    existing_pending = await ShopPurchase.find_one(
-        ShopPurchase.user_id == str(current_user.id),
-        ShopPurchase.status == "pending",
-        ShopPurchase.created_at > three_mins_ago
-    )
-    if existing_pending:
-        raise HTTPException(status_code=400, detail="You already have a pending purchase. Please complete or cancel it first.")
+    if type == "otp":
+        existing_pending = await ShopPurchase.find_one(
+            ShopPurchase.user_id == str(current_user.id),
+            ShopPurchase.status == "pending",
+            ShopPurchase.created_at > three_mins_ago
+        )
+        if existing_pending:
+            raise HTTPException(status_code=400, detail="You already have a pending purchase. Please complete or cancel it first.")
+
     pending_purchases = await ShopPurchase.find(
         ShopPurchase.status == "pending",
         ShopPurchase.created_at > three_mins_ago
@@ -104,6 +107,8 @@ async def buy_random_account(current_user: User = Depends(get_current_user)):
     if current_user.wallet_balance < price:
         raise HTTPException(status_code=400, detail="Insufficient wallet balance")
 
+    now = datetime.now(timezone.utc)
+
     # 4. Pick random (Atomic Pick with Lock)
     async with picking_lock:
         # Re-verify candidates inside the lock to be absolute sure
@@ -119,16 +124,53 @@ async def buy_random_account(current_user: User = Depends(get_current_user)):
         
         account = random.choice(candidates)
         
-        # 5. Initiate Purchase (Inside lock to prevent others from picking this one)
-        purchase = ShopPurchase(
-            user_id=str(current_user.id),
-            account_id=str(account.id),
-            phone_number=account.phone_number,
-            price=price,
-            status="pending",
-            created_at=datetime.now(timezone.utc)
-        )
-        await purchase.insert()
+        if type == "direct":
+            # DIRECT PURCHASE FLOW
+            user = await User.get(ObjectId(current_user.id))
+            if user.wallet_balance < price:
+                raise HTTPException(status_code=400, detail="Insufficient wallet balance")
+            
+            user.wallet_balance -= price
+            await user.save()
+
+            account.user_id = str(user.id)
+            account.is_for_sale = False
+            account.is_sold = True
+            account.sold_at = now
+            await account.save()
+
+            txn = WalletTransaction(
+                user_id=str(user.id),
+                amount=price,
+                type="debit",
+                description=f"Purchased account {account.phone_number} (Direct Add)",
+                reference_id=str(account.id),
+                created_at=now
+            )
+            await txn.insert()
+
+            purchase = ShopPurchase(
+                user_id=str(user.id),
+                account_id=str(account.id),
+                phone_number=account.phone_number,
+                price=price,
+                status="success",
+                purchase_type="direct",
+                created_at=now
+            )
+            await purchase.insert()
+        else:
+            # OTP PURCHASE FLOW
+            purchase = ShopPurchase(
+                user_id=str(current_user.id),
+                account_id=str(account.id),
+                phone_number=account.phone_number,
+                price=price,
+                status="pending",
+                purchase_type="otp",
+                created_at=now
+            )
+            await purchase.insert()
     
     # Broadcast Stock Update
     available_count = await TelegramAccount.find(
@@ -143,6 +185,7 @@ async def buy_random_account(current_user: User = Depends(get_current_user)):
         "status": purchase.status,
         "phone_number": account.phone_number,
         "price": price,
+        "purchase_type": purchase.purchase_type,
         "timeout_mins": timeout_mins,
         "created_at": purchase.created_at.isoformat() if purchase.created_at.tzinfo else purchase.created_at.replace(tzinfo=timezone.utc).isoformat()
     }

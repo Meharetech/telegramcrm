@@ -83,26 +83,61 @@ async def check_plan_limit(user: User, field: str, current_count: Optional[int] 
     Checks if a user has access to a feature or if they've exceeded a quantity limit.
     - If current_count is None: checks if the boolean 'field' is True.
     - If current_count is provided: checks if current_count < plan[field] (where -1 is unlimited).
-    - If user has NO plan: everything (except basic dashboard) is restricted.
+    - If user has NO plan: falls back to Demo Limits for core features (accounts, proxies, API).
     """
     if user.is_admin:
         return True # Admin always bypasses limits
 
-    if not user.plan_id:
-        raise HTTPException(status_code=403, detail="No active subscription plan found. Please purchase a plan.")
+    # ── Demo / Free Tier Fallback ──
+    from app.models import SystemSettings
+    settings = await SystemSettings.find_one()
+    if not settings:
+        settings = SystemSettings()
 
-    # Check for expiry
-    if user.plan_expiry_at:
-        # Normalize to UTC for comparison
-        from datetime import timezone
-        now = datetime.now(timezone.utc)
-        # Ensure user.plan_expiry_at is timezone-aware if the comparison demands it, 
-        # or compare naive if both are naive. Beanie usually stores as UTC/aware.
-        expiry = user.plan_expiry_at
-        if expiry.tzinfo is None:
-            expiry = expiry.replace(tzinfo=timezone.utc)
+    demo_limits = {
+        "max_accounts": settings.demo_max_accounts,
+        "max_proxies": settings.demo_max_proxies,
+        "max_api_keys": settings.demo_max_api_keys,
+        "daily_contacts_limit": settings.demo_daily_contacts_limit,
+        "can_auto_reply": settings.demo_can_auto_reply,
+        "can_forward": settings.demo_can_forward,
+        "can_react": settings.demo_can_react,
+        "access_connect": True
+    }
+
+    is_demo = False
+    if not user.plan_id:
+        is_demo = True
+    else:
+        # Check for expiry
+        if user.plan_expiry_at:
+            from datetime import timezone
+            now = datetime.now(timezone.utc)
+            expiry = user.plan_expiry_at
+            if expiry.tzinfo is None:
+                expiry = expiry.replace(tzinfo=timezone.utc)
+                
+            if now > expiry:
+                is_demo = True # Treat expired users as Demo users for core features
+
+    if is_demo:
+        if field in demo_limits:
+            val = demo_limits[field]
             
-        if now > expiry:
+            # Boolean check
+            if current_count is None:
+                if val is True: return True
+                return False # Should not happen based on demo_limits definition
+            
+            # Quantity check
+            if current_count >= val:
+                raise HTTPException(status_code=403, detail=f"Demo limit reached: {val} {field.replace('max_', '')}. Please purchase a plan for more.")
+            return True
+            
+        # If not a demo feature, block access
+        if not user.plan_id:
+            raise HTTPException(status_code=403, detail="No active subscription plan found. Please purchase a plan.")
+        else:
             raise HTTPException(status_code=403, detail="Your subscription plan has expired. Please renew to continue using this feature.")
 
     plan = await Plan.get(ObjectId(user.plan_id))

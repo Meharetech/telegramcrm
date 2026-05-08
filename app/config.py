@@ -26,6 +26,9 @@ class Settings(BaseSettings):
     RAZORPAY_KEY_ID: str = ""
     RAZORPAY_KEY_SECRET: str = ""
 
+    # Firebase
+    FIREBASE_API_KEY: Optional[str] = None
+
     # Member Adding Settings
     MA_CONSECUTIVE_PRIVACY_THRESHOLD: int = 10
     MA_MAX_FLOOD_SLEEP_THRESHOLD: int = 300  # Max seconds to sleep before pausing account

@@ -158,6 +158,15 @@ class SystemSettingsSchema(BaseModel):
     razorpay_key_secret: Optional[str] = None
     manual_gateways: list[ManualGatewaySchema] = []
     crypto_gateways: list[CryptoGatewaySchema] = []
+    
+    # Demo / Free Tier Limits
+    demo_max_accounts: int = 5
+    demo_max_proxies: int = 50
+    demo_max_api_keys: int = 50
+    demo_daily_contacts_limit: int = 0
+    demo_can_auto_reply: bool = False
+    demo_can_forward: bool = False
+    demo_can_react: bool = False
 
 class InitiateManualPaymentReq(BaseModel):
     plan_id: str

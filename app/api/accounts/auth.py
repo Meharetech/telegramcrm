@@ -597,6 +597,35 @@ async def delete_account(account_id: str, current_user: User = Depends(get_curre
         print(f"[delete_account] Critical error: {e}")
         raise HTTPException(status_code=400, detail=str(e))
 
+@router.post("/bulk-delete")
+async def bulk_delete_accounts(ids: list[str], current_user: User = Depends(get_current_user)):
+    from bson import ObjectId
+    from app.models.auto_reply import AutoReplySettings, AutoReplyRule
+    from app.models.forwarder import ForwarderRule
+    
+    success_count = 0
+    for acc_id in ids:
+        try:
+            acc = await TelegramAccount.find_one(
+                TelegramAccount.id == ObjectId(acc_id),
+                TelegramAccount.user_id == str(current_user.id)
+            )
+            if not acc:
+                continue
+            
+            # Clean up associated data
+            await AutoReplySettings.find(AutoReplySettings.account_id == acc_id).delete()
+            await AutoReplyRule.find(AutoReplyRule.account_id == acc_id).delete()
+            await ForwarderRule.find(ForwarderRule.account_id == acc_id).delete()
+            
+            # Remove identity
+            await acc.delete()
+            success_count += 1
+        except Exception as e:
+            print(f"[bulk_delete] Error deleting {acc_id}: {e}")
+            
+    return {"status": "success", "count": success_count}
+
 @router.post("/{account_id}/check-ban")
 async def check_ban(account_id: str, current_user: User = Depends(get_current_user)):
     from bson import ObjectId

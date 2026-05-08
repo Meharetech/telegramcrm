@@ -35,5 +35,14 @@ class SystemSettings(Document):
     shop_account_price: float = 45.0
     shop_otp_timeout_mins: int = 3
 
+    # Demo / Free Tier Limits
+    demo_max_accounts: int = 5
+    demo_max_proxies: int = 50
+    demo_max_api_keys: int = 50
+    demo_daily_contacts_limit: int = 0
+    demo_can_auto_reply: bool = False
+    demo_can_forward: bool = False
+    demo_can_react: bool = False
+
     class Settings:
         name = "system_settings"
