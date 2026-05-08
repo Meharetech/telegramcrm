@@ -20,6 +20,7 @@ class User(Document):
     plan_id: Optional[str] = None  # Reference to Plan._id assigned by admin
     plan_expiry_at: Optional[datetime] = None
     billing_cycle: Optional[str] = None # 'monthly' or 'yearly'
+    trial_started_at: Optional[datetime] = None # When user first started using free trial
     wallet_balance: float = 0.0 # User's credit balance
     last_start_at: Optional[datetime] = None
     last_stop_at: Optional[datetime] = None

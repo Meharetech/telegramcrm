@@ -223,6 +223,27 @@ def plan_to_dict(p: Plan) -> dict:
         "max_folder_accounts": getattr(p, "max_folder_accounts", 1),
     }
 
+async def get_demo_plan_data() -> dict:
+    settings_db = await SystemSettings.find_one()
+    if not settings_db:
+        settings_db = SystemSettings()
+    
+    return {
+        "id": "demo",
+        "name": "Free Trial Plan",
+        "price_inr": 0,
+        "max_accounts": settings_db.demo_max_accounts,
+        "max_proxies": settings_db.demo_max_proxies,
+        "max_api_keys": settings_db.demo_max_api_keys,
+        "daily_contacts_limit": getattr(settings_db, "demo_daily_contacts_limit", 0),
+        "can_auto_reply": getattr(settings_db, "demo_can_auto_reply", False),
+        "can_forward": getattr(settings_db, "demo_can_forward", False),
+        "can_react": getattr(settings_db, "demo_can_react", False),
+        "access_connect": True,
+        "is_demo": True
+    }
+
+
 
 # ── Admin CRUD ────────────────────────────────────────────────────────────────
 
@@ -460,12 +481,66 @@ async def list_public_plans(current_user: User = Depends(get_current_user)):
 async def get_my_plan(current_user: User = Depends(get_current_user)):
     """Returns the active plan assigned to the currently authenticated user with expiry."""
     if not current_user.plan_id or current_user.plan_id == "null":
-        return {"plan": None, "expiry_at": None, "is_expired": False}
+        # 1. Initialize trial if not set
+        if not getattr(current_user, "trial_started_at", None):
+            current_user.trial_started_at = datetime.now(timezone.utc)
+            await current_user.save()
+        
+        # 2. Check Expiration (7 Days)
+        now = datetime.now(timezone.utc)
+        start = current_user.trial_started_at.replace(tzinfo=timezone.utc) if current_user.trial_started_at.tzinfo is None else current_user.trial_started_at
+        days_passed = (now - start).days
+        
+        if days_passed >= 7:
+            return {
+                "plan": None,
+                "expiry_at": None,
+                "is_expired": True,
+                "services_active": False,
+                "trial_expired": True
+            }
+        
+        demo_plan = await get_demo_plan_data()
+        demo_plan["trial_days_left"] = max(0, 7 - days_passed)
+
+        return {
+            "plan": demo_plan,
+            "expiry_at": (start + timedelta(days=7)).isoformat(),
+            "is_expired": False,
+            "services_active": getattr(current_user, "services_active", False)
+        }
     
     try:
         plan = await Plan.get(ObjectId(current_user.plan_id))
         if not plan:
-            return {"plan": None, "expiry_at": None, "is_expired": False}
+            # 1. Initialize trial if not set
+            if not getattr(current_user, "trial_started_at", None):
+                current_user.trial_started_at = datetime.now(timezone.utc)
+                await current_user.save()
+            
+            # 2. Check Expiration (7 Days)
+            now = datetime.now(timezone.utc)
+            start = current_user.trial_started_at.replace(tzinfo=timezone.utc) if current_user.trial_started_at.tzinfo is None else current_user.trial_started_at
+            days_passed = (now - start).days
+            
+            if days_passed >= 7:
+                return {
+                    "plan": None,
+                    "expiry_at": None,
+                    "is_expired": True,
+                    "services_active": False,
+                    "trial_expired": True
+                }
+            
+            demo_plan = await get_demo_plan_data()
+            demo_plan["trial_days_left"] = max(0, 7 - days_passed)
+
+            return {
+                "plan": demo_plan,
+                "expiry_at": (start + timedelta(days=7)).isoformat(),
+                "is_expired": False,
+                "services_active": getattr(current_user, "services_active", False)
+            }
 
         # ── Individual Service Disable ─────────────────────────────────────────
         disabled = getattr(current_user, "disabled_services", [])
@@ -523,6 +598,9 @@ async def get_my_plan(current_user: User = Depends(get_current_user)):
             # Estimate purchase date based on cycle
             days = 365 if getattr(current_user, 'billing_cycle', None) == 'yearly' else 30
             purchased_at = current_user.plan_expiry_at - timedelta(days=days)
+
+        if is_expired:
+            plan_dict = await get_demo_plan_data()
 
         return {
             "plan": plan_dict,
