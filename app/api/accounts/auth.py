@@ -212,6 +212,11 @@ async def verify_code(req: VerifyRequest, current_user: User = Depends(get_curre
                 return {"status": "requires_password", "message": "2FA is enabled. Please provide your password."}
             await client.sign_in(password=req.password)
 
+        # FINAL QUANTITY CHECK (Double-check before saving)
+        from app.api.auth_utils import check_plan_limit
+        acc_count = await TelegramAccount.find(TelegramAccount.user_id == session_data["user_id"]).count()
+        await check_plan_limit(current_user, "max_accounts", acc_count)
+
         # Get the StringSession
         string_session = client.session.save()
         
@@ -267,6 +272,22 @@ async def wait_for_qr_login(session_id: str):
             me = await client.get_me()
             phone = me.phone or f"QR_{me.id}"
             
+            # FINAL QUANTITY CHECK (Double-check before saving)
+            from app.api.auth_utils import check_plan_limit
+            acc_count = await TelegramAccount.find(TelegramAccount.user_id == data["user_id"]).count()
+            try:
+                # We can't easily get 'current_user' in this background task, but we can verify manually
+                # Or just let it be, but the safest way is to check against a user object.
+                # Since this is a background task, we'll fetch the user first.
+                user_obj = await User.get(ObjectId(data["user_id"]))
+                if user_obj:
+                    await check_plan_limit(user_obj, "max_accounts", acc_count)
+            except Exception as e:
+                data["status"] = "error"
+                data["error"] = str(e)
+                await client.disconnect()
+                return
+
             # Save to MongoDB
             acc = TelegramAccount(
                 user_id=data["user_id"],
@@ -311,6 +332,13 @@ async def qr_password_verify(req: QRVerifyRequest):
         await client.sign_in(password=req.password)
         
         if await client.is_user_authorized():
+            # FINAL QUANTITY CHECK (Double-check before saving)
+            from app.api.auth_utils import check_plan_limit
+            acc_count = await TelegramAccount.find(TelegramAccount.user_id == data["user_id"]).count()
+            user_obj = await User.get(ObjectId(data["user_id"]))
+            if user_obj:
+                await check_plan_limit(user_obj, "max_accounts", acc_count)
+
             string_session = client.session.save()
             me = await client.get_me()
             phone = me.phone or f"QR_{me.id}"
@@ -589,7 +617,10 @@ async def delete_account(account_id: str, current_user: User = Depends(get_curre
         # Delete Forwarder Rules
         await ForwarderRule.find(ForwarderRule.account_id == account_id).delete()
 
-        # 3. Final removal of the identity
+        # 3. Release assigned proxy so it can be reused
+        await Proxy.find(Proxy.assigned_account_id == account_id).update({"$set": {"assigned_account_id": None}})
+
+        # 4. Final removal of the identity
         await acc.delete()
         
         return {"status": "success", "message": "Account and all associated settings removed."}
@@ -617,6 +648,9 @@ async def bulk_delete_accounts(ids: list[str], current_user: User = Depends(get_
             await AutoReplySettings.find(AutoReplySettings.account_id == acc_id).delete()
             await AutoReplyRule.find(AutoReplyRule.account_id == acc_id).delete()
             await ForwarderRule.find(ForwarderRule.account_id == acc_id).delete()
+            
+            # Release proxy
+            await Proxy.find(Proxy.assigned_account_id == acc_id).update({"$set": {"assigned_account_id": None}})
             
             # Remove identity
             await acc.delete()

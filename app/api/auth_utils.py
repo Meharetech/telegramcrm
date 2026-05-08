@@ -104,24 +104,70 @@ async def check_plan_limit(user: User, field: str, current_count: Optional[int] 
         "can_react": settings.demo_can_react,
         "access_connect": True,
         "access_group_joiner": True,
-        "access_member_adding": True
+        "access_member_adding": True,
+        "access_group_scraping": True,
+        "access_message_sender": True,
+        "access_terminal": True,
+        "access_contacts_manager": True,
+        "access_reminders": True,
+        "access_bot_hub": True
     }
 
     is_demo = False
     
     # ── Trial Period Logic ──
     is_in_trial = False
-    if not user.trial_started_at:
-        from datetime import timezone
-        user.trial_started_at = datetime.now(timezone.utc)
-        await user.save()
-        is_in_trial = True
-    else:
-        from datetime import timezone
-        now = datetime.now(timezone.utc)
-        start = user.trial_started_at.replace(tzinfo=timezone.utc) if user.trial_started_at.tzinfo is None else user.trial_started_at
-        if (now - start).days < 7:
+    
+    # Fetch Master Settings from DB
+    from app.models.system_settings import SystemSettings
+    sys_settings = await SystemSettings.find_one()
+
+    if not user.plan_id:
+        if not user.trial_started_at:
+            from datetime import timezone
+            user.trial_started_at = datetime.now(timezone.utc)
+            await user.save()
             is_in_trial = True
+        else:
+            from datetime import timezone
+            now = datetime.now(timezone.utc)
+            start = user.trial_started_at.replace(tzinfo=timezone.utc) if user.trial_started_at.tzinfo is None else user.trial_started_at
+            if (now - start).days < 7:
+                is_in_trial = True
+
+    # If in trial, follow the Admin Demo Settings (but force 1 account limit)
+    if is_in_trial:
+        demo_limits["max_accounts"] = 1
+        
+        # Link to Admin Demo Settings from Database
+        if sys_settings:
+            demo_limits["max_proxies"] = sys_settings.demo_max_proxies
+            demo_limits["max_api_keys"] = sys_settings.demo_max_api_keys
+            demo_limits["max_auto_replies"] = sys_settings.demo_max_auto_replies
+            demo_limits["max_reaction_channels"] = sys_settings.demo_max_reaction_channels
+            demo_limits["max_forwarder_channels"] = sys_settings.demo_max_forwarder_channels
+            demo_limits["max_bots"] = sys_settings.demo_max_bots
+            
+            # Feature Access Toggles
+            demo_limits["access_member_adding"] = sys_settings.demo_access_member_adding
+            demo_limits["access_group_joiner"] = sys_settings.demo_access_group_joiner
+            demo_limits["access_group_scraping"] = sys_settings.demo_access_group_scraping
+            demo_limits["access_message_sender"] = sys_settings.demo_access_message_sender
+            demo_limits["access_terminal"] = sys_settings.demo_access_terminal
+            demo_limits["access_contacts_manager"] = sys_settings.demo_access_contacts_manager
+            demo_limits["access_reminders"] = sys_settings.demo_access_reminders
+            demo_limits["access_bot_hub"] = sys_settings.demo_access_bot_hub
+            demo_limits["access_folder_campaign"] = sys_settings.demo_access_folder_campaign
+            demo_limits["access_folder_scraper"] = sys_settings.demo_access_folder_scraper
+            demo_limits["access_creative_tools"] = sys_settings.demo_access_creative_tools
+            demo_limits["access_ban_checker"] = sys_settings.demo_access_ban_checker
+            demo_limits["can_auto_reply"] = sys_settings.demo_can_auto_reply
+            demo_limits["can_forward"] = sys_settings.demo_can_forward
+            demo_limits["can_react"] = sys_settings.demo_can_react
+        else:
+            # Fallback to hardcoded defaults if no settings in DB
+            demo_limits["max_proxies"] = 50
+            demo_limits["max_api_keys"] = 50
 
     if not user.plan_id or is_in_trial:
         is_demo = True
@@ -141,15 +187,28 @@ async def check_plan_limit(user: User, field: str, current_count: Optional[int] 
         if field in demo_limits:
             val = demo_limits[field]
             
-            # Boolean check
+            # Case 1: Boolean Access Check
             if current_count is None:
                 if val is True: return True
-                return False # Should not happen based on demo_limits definition
+                msg = "Feature locked in trial. Please upgrade." if is_in_trial else "Feature locked in demo mode. Please upgrade."
+                raise HTTPException(status_code=403, detail=msg)
             
-            # Quantity check
+            # Case 2: Quantity Limit Check
+            if val == -1: return True
             if current_count >= val:
-                raise HTTPException(status_code=403, detail=f"Demo limit reached: {val} {field.replace('max_', '')}. Please purchase a plan for more.")
+                msg = f"Trial limit reached: {val} {field.replace('max_', '')}. Please purchase a plan for more." if is_in_trial else f"Demo limit reached: {val} {field.replace('max_', '')}. Please purchase a plan for more."
+                raise HTTPException(status_code=403, detail=msg)
             return True
+        
+        # If the user is in trial, allow access even if not in demo_limits (for missing boolean features)
+        if is_in_trial:
+            if field.startswith(("access_", "can_")):
+                return True
+            if current_count is not None:
+                # If quantity field not specifically handled, allow a default trial limit of 1
+                if current_count >= 1:
+                    raise HTTPException(status_code=403, detail="Trial limit reached. Please purchase a plan for full access.")
+                return True
             
         # If not a demo feature, block access
         if not user.plan_id:

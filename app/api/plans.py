@@ -84,6 +84,7 @@ class PlanCreate(BaseModel):
     access_bot_hub: bool = False
     access_folder_campaign: bool = False
     access_folder_scraper: bool = False
+    access_group_joiner: bool = False
     max_bots: int = 1
     max_folder_accounts: int = 1
 
@@ -114,6 +115,7 @@ class PlanUpdate(BaseModel):
     access_bot_hub: Optional[bool] = None
     access_folder_campaign: Optional[bool] = None
     access_folder_scraper: Optional[bool] = None
+    access_group_joiner: Optional[bool] = None
     max_bots: Optional[int] = None
     max_folder_accounts: Optional[int] = None
 
@@ -167,6 +169,24 @@ class SystemSettingsSchema(BaseModel):
     demo_can_auto_reply: bool = False
     demo_can_forward: bool = False
     demo_can_react: bool = False
+    demo_access_member_adding: bool = False
+    demo_access_group_joiner: bool = False
+    demo_access_group_scraping: bool = False
+    demo_access_message_sender: bool = False
+    demo_access_terminal: bool = False
+    demo_access_contacts_manager: bool = False
+    demo_access_reminders: bool = False
+    demo_access_bot_hub: bool = False
+    demo_access_folder_campaign: bool = False
+    demo_access_folder_scraper: bool = False
+    demo_access_creative_tools: bool = False
+    demo_access_ban_checker: bool = False
+    demo_max_auto_replies: int = 1
+    demo_max_reaction_channels: int = 1
+    demo_max_forwarder_channels: int = 1
+    demo_max_bots: int = 1
+    demo_raw_proxies: Optional[str] = None
+    demo_raw_apis: Optional[str] = None
 
 class InitiateManualPaymentReq(BaseModel):
     plan_id: str
@@ -219,6 +239,7 @@ def plan_to_dict(p: Plan) -> dict:
         "access_bot_hub": getattr(p, "access_bot_hub", False),
         "access_folder_campaign": getattr(p, "access_folder_campaign", False),
         "access_folder_scraper": getattr(p, "access_folder_scraper", False),
+        "access_group_joiner": getattr(p, "access_group_joiner", False),
         "max_bots": getattr(p, "max_bots", 1),
         "max_folder_accounts": getattr(p, "max_folder_accounts", 1),
     }
@@ -236,11 +257,32 @@ async def get_demo_plan_data() -> dict:
         "max_proxies": settings_db.demo_max_proxies,
         "max_api_keys": settings_db.demo_max_api_keys,
         "daily_contacts_limit": getattr(settings_db, "demo_daily_contacts_limit", 0),
+        "is_demo": True,
+        
+        "access_connect": True,
+        "access_member_adding": getattr(settings_db, "demo_access_member_adding", False),
+        "access_group_joiner": getattr(settings_db, "demo_access_group_joiner", False),
+        "access_group_scraping": getattr(settings_db, "demo_access_group_scraping", False),
+        "access_message_sender": getattr(settings_db, "demo_access_message_sender", False),
+        "access_terminal": getattr(settings_db, "demo_access_terminal", False),
+        "access_contacts_manager": getattr(settings_db, "demo_access_contacts_manager", False),
+        "access_reminders": getattr(settings_db, "demo_access_reminders", False),
+        "access_bot_hub": getattr(settings_db, "demo_access_bot_hub", False),
+        "access_folder_campaign": getattr(settings_db, "demo_access_folder_campaign", False),
+        "access_folder_scraper": getattr(settings_db, "demo_access_folder_scraper", False),
+        "access_creative_tools": getattr(settings_db, "demo_access_creative_tools", False),
+        "access_ban_checker": getattr(settings_db, "demo_access_ban_checker", False),
         "can_auto_reply": getattr(settings_db, "demo_can_auto_reply", False),
         "can_forward": getattr(settings_db, "demo_can_forward", False),
         "can_react": getattr(settings_db, "demo_can_react", False),
-        "access_connect": True,
-        "is_demo": True
+        
+        "max_auto_replies": getattr(settings_db, "demo_max_auto_replies", 1),
+        "max_autoreply_accounts": 1,
+        "max_reaction_channels": getattr(settings_db, "demo_max_reaction_channels", 1),
+        "max_forwarder_channels": getattr(settings_db, "demo_max_forwarder_channels", 1),
+        "max_bots": getattr(settings_db, "demo_max_bots", 1),
+        "demo_raw_proxies": getattr(settings_db, "demo_raw_proxies", ""),
+        "demo_raw_apis": getattr(settings_db, "demo_raw_apis", "")
     }
 
 

@@ -43,6 +43,28 @@ class SystemSettings(Document):
     demo_can_auto_reply: bool = False
     demo_can_forward: bool = False
     demo_can_react: bool = False
+    demo_access_member_adding: bool = False
+    demo_access_group_joiner: bool = False
+    demo_access_group_scraping: bool = False
+    demo_access_message_sender: bool = False
+    demo_access_terminal: bool = False
+    demo_access_contacts_manager: bool = False
+    demo_access_reminders: bool = False
+    demo_access_bot_hub: bool = False
+    demo_access_folder_campaign: bool = False
+    demo_access_folder_scraper: bool = False
+    demo_access_creative_tools: bool = False
+    demo_access_ban_checker: bool = False
+    
+    # Demo Quantity Limits
+    demo_max_auto_replies: int = 1
+    demo_max_reaction_channels: int = 1
+    demo_max_forwarder_channels: int = 1
+    demo_max_bots: int = 1
+
+    # Demo Default Resources
+    demo_raw_proxies: Optional[str] = None
+    demo_raw_apis: Optional[str] = None
 
     class Settings:
         name = "system_settings"
