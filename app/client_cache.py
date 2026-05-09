@@ -43,7 +43,7 @@ _account_user_cache: Dict[str, str] = {}
 # { user_id: bool } — local cache for services_active status (refreshed every 5 mins)
 _user_active_cache: Dict[str, bool] = {}
 _user_active_expiry: Dict[str, datetime] = {}
-# { account_id } — accounts that are IMMUNE to pruning (e.g. active voice chats)
+# { account_id } — accounts that are IMMUNE to pruning (e.g. long-running background tasks)
 PRUNE_IMMUNE_ACCOUNTS = set()
 
 IDLE_LIMIT_SECONDS = 300 # 5 Minutes (Reduced for Phase 2 RAM Optimization)
@@ -386,7 +386,7 @@ async def prune_others(keep_account_id: str, active_user_id: str) -> int:
             # logger.debug(f"[cache] Skipping prune (Scraping): {acc_id}")
             continue
 
-        # ── Rule 6: Keep if Immune (Voice Chat, etc.) ──
+        # ── Rule 6: Keep if Immune (Background Services, etc.) ──
         if acc_id in PRUNE_IMMUNE_ACCOUNTS:
             continue
 

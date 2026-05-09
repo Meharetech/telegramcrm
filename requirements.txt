@@ -23,4 +23,3 @@ cryptography
 bcrypt
 faker
 httpx
-pytgcalls
