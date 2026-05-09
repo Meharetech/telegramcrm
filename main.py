@@ -18,6 +18,7 @@ from app.models import (
 from app.models.auto_reply import AutoReplyRule, AutoReplySettings
 from app.models.folder_campaign import FolderCampaignJob
 from app.models.group_join import GroupJoinJob
+from app.models.voice_chat import VoiceChatHistory
 from app.api.accounts import router as account_router
 from app.api.auto_reply import router as auto_reply_router
 from app.api.forwarder import router as forwarder_router
@@ -32,6 +33,7 @@ from app.api.shop import router as shop_router
 from app.api.accounts.otp_viewer import router as otp_viewer_router
 from app.api.folder_campaign import router as folder_campaign_router
 from app.api.ai_agent import router as ai_agent_router
+from app.api.voice_chat import router as voice_chat_router
 from contextlib import asynccontextmanager
 from app.client_cache import shutdown_all, start_maintenance
 from app.config import settings
@@ -235,7 +237,7 @@ async def lifespan(app: FastAPI):
                 ForwarderRule, TelegramAPI, ReactionTask, Reminder, Proxy, SystemLog,
                 MemberAddSettings, MemberAddJob, MemberAddSchedule, MessageCampaignJob, MessageCampaignSchedule, Plan, Payment,
                 SystemSettings, BotForwarder, WalletTransaction, ShopPurchase, FolderCampaignJob, GroupJoinJob,
-                AiAgent, AiKnowledgeSummary, AiReplyLog, AiSettings
+                AiAgent, AiKnowledgeSummary, AiReplyLog, AiSettings, VoiceChatHistory
             ]
         )
 
@@ -265,6 +267,14 @@ async def lifespan(app: FastAPI):
             logger.info("[startup] Message Campaign Scheduler started")
         except Exception as e:
             logger.error(f"[startup] Message Campaign Scheduler failed: {e}")
+
+        # ── Start Voice Chat Heartbeat ──────────────────────────────────────
+        try:
+            from app.services.voice_chat import start_voice_chat_heartbeat
+            create_task(start_voice_chat_heartbeat())
+            logger.info("[startup] Voice Chat Heartbeat worker started")
+        except Exception as e:
+            logger.error(f"[startup] Voice Chat Heartbeat failed: {e}")
 
         # ── Migration & Resilience (COLD START MODE) ──────────────────────────
         try:
@@ -338,6 +348,7 @@ app.include_router(otp_viewer_router, prefix="/api/otp", tags=["OTP Viewer"])
 app.include_router(folder_campaign_router, prefix="/api/folder-campaign", tags=["Folder Campaign"])
 app.include_router(group_join_router, prefix="/api/group-join", tags=["Group Joiner"])
 app.include_router(ai_agent_router, prefix="/api/ai-agent", tags=["AI Agent"])
+app.include_router(voice_chat_router, prefix="/api/voice-chat", tags=["Voice Chat"])
 app.include_router(ws_router,         prefix="/api",             tags=["WebSockets"])
 
 @app.get("/")

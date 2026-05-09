@@ -43,6 +43,8 @@ _account_user_cache: Dict[str, str] = {}
 # { user_id: bool } — local cache for services_active status (refreshed every 5 mins)
 _user_active_cache: Dict[str, bool] = {}
 _user_active_expiry: Dict[str, datetime] = {}
+# { account_id } — accounts that are IMMUNE to pruning (e.g. active voice chats)
+PRUNE_IMMUNE_ACCOUNTS = set()
 
 IDLE_LIMIT_SECONDS = 300 # 5 Minutes (Reduced for Phase 2 RAM Optimization)
 
@@ -68,6 +70,11 @@ async def _run_maintenance():
             for acc_id, last_time in list(_last_used.items()):
                 delta = (now - last_time).total_seconds()
                 if delta > IDLE_LIMIT_SECONDS:
+                    # CHECK: Is this account immune?
+                    if acc_id in PRUNE_IMMUNE_ACCOUNTS:
+                        touch(acc_id) # Refresh timestamp instead of pruning
+                        continue
+                        
                     # Check if client is actually in cache before trying to evict
                     if acc_id in _cache:
                         logger.info(f"[cache] Pruning idle client: {acc_id} (Idle for {int(delta)}s)")
@@ -377,6 +384,10 @@ async def prune_others(keep_account_id: str, active_user_id: str) -> int:
         # ── Rule 5: Keep if Scraping is ON ──
         if acc_id in ACTIVE_SCRAPES:
             # logger.debug(f"[cache] Skipping prune (Scraping): {acc_id}")
+            continue
+
+        # ── Rule 6: Keep if Immune (Voice Chat, etc.) ──
+        if acc_id in PRUNE_IMMUNE_ACCOUNTS:
             continue
 
         # All checks passed — this account is 'idle' from a user perspective.

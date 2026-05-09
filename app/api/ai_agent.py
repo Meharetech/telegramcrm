@@ -229,3 +229,46 @@ async def get_ai_stats(user=Depends(get_current_user)):
         "active_count": len(active_agents),
         "active_account_ids": [getattr(a, "account_id", "") for a in active_agents]
     }
+
+@router.post("/public-chat")
+async def public_chat(req: dict = Body(...)):
+    message = req.get("message")
+    if not message:
+        raise HTTPException(status_code=400, detail="Message is required")
+    
+    # Predefined knowledge about TelegramCrmAi
+    system_knowledge = """
+    TelegramCrmAi is the world's #1 AI-powered Telegram CRM.
+    
+    Key Features:
+    1. Bulk Messaging: Send high-volume campaigns with advanced anti-ban protection and smart scheduling.
+    2. Precision Scraper: Extract active members from any public or private Telegram group/channel.
+    3. Member Adding: Safely grow your community by adding members from competitor groups.
+    4. AI Reactions: Boost your post credibility and engagement using realistic account reactions.
+    5. Account Shop: Integrated marketplace to buy aged, verified Telegram accounts with OTP bypass.
+    6. Auto-Reply Bot: Deploy AI-powered agents that handle customer inquiries and close sales 24/7.
+    7. Multi-Account Management: Run and monitor hundreds of Telegram accounts from one dashboard.
+
+    Pricing & Trial:
+    - 7 Days FREE Trial: All premium features accessible for free.
+    - Basic Plan: $29/month - Manage up to 5 accounts.
+    - Pro Plan: $79/month - Manage up to 25 accounts.
+    - Agency Plan: $199/month - Manage unlimited accounts.
+    - Yearly Discount: Get 20% OFF on all yearly billing.
+
+    Support:
+    - Telegram: @telecrmai
+    - WhatsApp: +91 8708604830
+    - Email: telegramcrmai@gmail.com
+    - Website: https://telegramcrmai.com
+    """
+    
+    settings_db = await AiSettings.find_one(AiSettings.key == "global")
+    try:
+        reply = await call_openrouter(message, system_knowledge, settings_db)
+        return {"reply": reply}
+    except Exception as e:
+        # Fallback for common questions if AI fails
+        if "pricing" in message.lower():
+            return {"reply": "Our plans start at $29/mo, and we offer a 7-day FREE trial! Check the Pricing section for more details."}
+        raise HTTPException(status_code=500, detail=str(e))
