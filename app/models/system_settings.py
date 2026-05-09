@@ -55,12 +55,15 @@ class SystemSettings(Document):
     demo_access_folder_scraper: bool = False
     demo_access_creative_tools: bool = False
     demo_access_ban_checker: bool = False
+    demo_access_ai_agent: bool = False
     
     # Demo Quantity Limits
     demo_max_auto_replies: int = 1
     demo_max_reaction_channels: int = 1
     demo_max_forwarder_channels: int = 1
     demo_max_bots: int = 1
+    demo_ai_chatbot_limit: int = 200
+    demo_max_ai_agents: int = 1
 
     # Demo Default Resources
     demo_raw_proxies: Optional[str] = None

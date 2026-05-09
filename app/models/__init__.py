@@ -19,3 +19,7 @@ from .wallet_transaction import WalletTransaction
 from .shop_purchase import ShopPurchase
 from .folder_campaign import FolderCampaignJob
 from .group_join import GroupJoinJob
+from .ai_agent import AiAgent
+from .ai_knowledge import AiKnowledgeSummary
+from .ai_reply_log import AiReplyLog
+from .ai_settings import AiSettings

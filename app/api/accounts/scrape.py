@@ -751,29 +751,40 @@ async def get_folder_groups(account_id: str, folder_id: str, current_user: User 
         # include_peers is a list of InputPeer objects
         for peer in target_filter.include_peers:
             try:
+                # Use a more robust entity resolution
                 entity = await client.get_entity(peer)
                 
+                # Basic check for valid group/channel
+                if not entity or getattr(entity, 'deleted', False):
+                    continue
+
                 is_channel = getattr(entity, 'broadcast', False)
-                is_group = getattr(entity, 'megagroup', False) or (not is_channel and hasattr(entity, 'title'))
+                is_megagroup = getattr(entity, 'megagroup', False)
+                is_group = is_megagroup or (not is_channel and (hasattr(entity, 'title') or isinstance(entity, Chat)))
                 
                 if is_channel or is_group:
                     username = getattr(entity, 'username', None)
                     link = f"https://t.me/{username}" if username else None
                     
                     # Handle TextWithEntities for title
-                    raw_title = getattr(entity, 'title', 'Unknown')
+                    raw_title = getattr(entity, 'title', 'Unknown Group')
                     clean_title = getattr(raw_title, 'text', str(raw_title))
                     
-                    # Check if we can send messages
+                    # Check if we can send messages (Permissions Check)
                     can_send = False
-                    if is_channel and not getattr(entity, 'megagroup', False):
-                        if getattr(entity, 'creator', False) or getattr(entity, 'admin_rights', None):
-                            can_send = True
-                    else:
-                        if not getattr(entity, 'left', False) and not getattr(entity, 'kicked', False):
-                            banned = getattr(entity, 'banned_rights', None)
-                            if not banned or not getattr(banned, 'send_messages', False):
+                    try:
+                        if is_channel and not is_megagroup:
+                            # For broadcast channels, only admins can send
+                            if getattr(entity, 'creator', False) or getattr(entity, 'admin_rights', None):
                                 can_send = True
+                        else:
+                            # For groups/megagroups
+                            if not getattr(entity, 'left', False) and not getattr(entity, 'kicked', False):
+                                banned = getattr(entity, 'banned_rights', None)
+                                if not banned or not getattr(banned, 'send_messages', False):
+                                    can_send = True
+                    except Exception:
+                        pass # Default to False if permission check fails
 
                     groups.append({
                         "id": str(entity.id),
@@ -785,8 +796,14 @@ async def get_folder_groups(account_id: str, folder_id: str, current_user: User 
                         "can_send_messages": can_send,
                         "participants_count": getattr(entity, 'participants_count', 0)
                     })
+            except (ValueError, TypeError) as ve:
+                # Specific resolution errors (e.g. Peer not found)
+                continue
             except Exception as e:
-                logging.warning(f"Failed to resolve peer in folder: {e}")
+                # Log other unexpected errors but keep going
+                err_str = str(e)
+                if "lack permission" not in err_str.lower() and "Constructor ID" not in err_str:
+                    logging.warning(f"Failed to resolve peer {peer} in folder: {e}")
                 continue
 
         return groups

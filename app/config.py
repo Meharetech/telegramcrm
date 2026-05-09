@@ -28,6 +28,7 @@ class Settings(BaseSettings):
 
     # Firebase
     FIREBASE_API_KEY: Optional[str] = None
+    OPENROUTER_API_KEY: Optional[str] = None
 
     # Member Adding Settings
     MA_CONSECUTIVE_PRIVACY_THRESHOLD: int = 10

@@ -8,6 +8,7 @@ from .logic import is_daytime, should_trigger_welcome, matches_rule, resolve_var
 from .media import send_rule_media, mark_read
 from .cache import get_cached_settings, get_cached_rules
 from app.services.terminal_service import terminal_manager
+from app.services.ai_agent_service import handle_ai_message
 
 logger = logging.getLogger(__name__)
 
@@ -97,8 +98,15 @@ async def process_message_event(event, account_id: str):
         if not client: 
             await terminal_manager.log_event(user_id, f"❌ Engine Error: Telegram client not found.", account_id, "auto-reply", "ERROR")
             return
+        
+        # ── AI Agent Flow FIRST (bypasses master is_enabled check) ──────────
+        # AI Agent is independent of the keyword auto-reply system.
+        ai_replied = await handle_ai_message(account_id, event, client)
+        if ai_replied:
+            return
             
         settings = await get_cached_settings(account_id)
+
         if not settings or not settings.is_enabled:
             return
 

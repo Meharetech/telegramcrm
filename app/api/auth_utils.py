@@ -85,8 +85,8 @@ async def check_plan_limit(user: User, field: str, current_count: Optional[int] 
     - If current_count is provided: checks if current_count < plan[field] (where -1 is unlimited).
     - If user has NO plan: falls back to Demo Limits for core features (accounts, proxies, API).
     """
-    if user.is_admin:
-        return True # Admin always bypasses limits
+    if user.is_admin and field != "ai_chatbot_limit":
+        return True # Admin always bypasses limits for most features, but we enforce AI quota for testing/cost control
 
     # ── Demo / Free Tier Fallback ──
     from app.models import SystemSettings
@@ -110,7 +110,10 @@ async def check_plan_limit(user: User, field: str, current_count: Optional[int] 
         "access_terminal": True,
         "access_contacts_manager": True,
         "access_reminders": True,
-        "access_bot_hub": True
+        "access_bot_hub": True,
+        "access_ai_agent": False,
+        "ai_chatbot_limit": settings.demo_ai_chatbot_limit,
+        "max_ai_agents": settings.demo_max_ai_agents
     }
 
     is_demo = False
@@ -136,43 +139,67 @@ async def check_plan_limit(user: User, field: str, current_count: Optional[int] 
                 is_in_trial = True
 
     # If in trial, follow the Admin Demo Settings (but force 1 account limit)
+    # Link to Admin Demo Settings from Database
+    if sys_settings:
+        demo_limits["max_proxies"] = getattr(sys_settings, "demo_max_proxies", 50)
+        demo_limits["max_api_keys"] = getattr(sys_settings, "demo_max_api_keys", 50)
+        demo_limits["max_auto_replies"] = getattr(sys_settings, "demo_max_auto_replies", 1)
+        demo_limits["max_reaction_channels"] = getattr(sys_settings, "demo_max_reaction_channels", 1)
+        demo_limits["max_forwarder_channels"] = getattr(sys_settings, "demo_max_forwarder_channels", 1)
+        demo_limits["max_bots"] = getattr(sys_settings, "demo_max_bots", 1)
+        
+        # Feature Access Toggles
+        demo_limits["access_member_adding"] = getattr(sys_settings, "demo_access_member_adding", False)
+        demo_limits["access_group_joiner"] = getattr(sys_settings, "demo_access_group_joiner", False)
+        demo_limits["access_group_scraping"] = getattr(sys_settings, "demo_access_group_scraping", False)
+        demo_limits["access_message_sender"] = getattr(sys_settings, "demo_access_message_sender", False)
+        demo_limits["access_terminal"] = getattr(sys_settings, "demo_access_terminal", False)
+        demo_limits["access_contacts_manager"] = getattr(sys_settings, "demo_access_contacts_manager", False)
+        demo_limits["access_reminders"] = getattr(sys_settings, "demo_access_reminders", False)
+        demo_limits["access_bot_hub"] = getattr(sys_settings, "demo_access_bot_hub", False)
+        demo_limits["access_folder_campaign"] = getattr(sys_settings, "demo_access_folder_campaign", False)
+        demo_limits["access_folder_scraper"] = getattr(sys_settings, "demo_access_folder_scraper", False)
+        demo_limits["access_creative_tools"] = getattr(sys_settings, "demo_access_creative_tools", False)
+        demo_limits["access_ban_checker"] = getattr(sys_settings, "demo_access_ban_checker", False)
+        demo_limits["can_auto_reply"] = getattr(sys_settings, "demo_can_auto_reply", False)
+        demo_limits["can_forward"] = getattr(sys_settings, "demo_can_forward", False)
+        demo_limits["can_react"] = getattr(sys_settings, "demo_can_react", False)
+        demo_limits["access_ai_agent"] = getattr(sys_settings, "demo_access_ai_agent", False)
+        demo_limits["ai_chatbot_limit"] = getattr(sys_settings, "demo_ai_chatbot_limit", 200)
+        demo_limits["max_ai_agents"] = getattr(sys_settings, "demo_max_ai_agents", 1)
+    else:
+        # Fallback to hardcoded defaults (Everything OPEN for Demo/Trial by default)
+        demo_limits["max_proxies"] = 50
+        demo_limits["max_api_keys"] = 50
+        demo_limits["max_accounts"] = 1
+        demo_limits["access_member_adding"] = True
+        demo_limits["access_group_joiner"] = True
+        demo_limits["access_group_scraping"] = True
+        demo_limits["access_message_sender"] = True
+        demo_limits["access_terminal"] = True
+        demo_limits["access_contacts_manager"] = True
+        demo_limits["access_reminders"] = True
+        demo_limits["access_bot_hub"] = True
+        demo_limits["access_folder_campaign"] = True
+        demo_limits["access_folder_scraper"] = True
+        demo_limits["access_creative_tools"] = True
+        demo_limits["access_ban_checker"] = True
+        demo_limits["can_auto_reply"] = True
+        demo_limits["can_forward"] = True
+        demo_limits["can_react"] = True
+        demo_limits["access_ai_agent"] = True
+        demo_limits["ai_chatbot_limit"] = 200
+        demo_limits["max_ai_agents"] = 1
+
     if is_in_trial:
         demo_limits["max_accounts"] = 1
-        
-        # Link to Admin Demo Settings from Database
-        if sys_settings:
-            demo_limits["max_proxies"] = sys_settings.demo_max_proxies
-            demo_limits["max_api_keys"] = sys_settings.demo_max_api_keys
-            demo_limits["max_auto_replies"] = sys_settings.demo_max_auto_replies
-            demo_limits["max_reaction_channels"] = sys_settings.demo_max_reaction_channels
-            demo_limits["max_forwarder_channels"] = sys_settings.demo_max_forwarder_channels
-            demo_limits["max_bots"] = sys_settings.demo_max_bots
-            
-            # Feature Access Toggles
-            demo_limits["access_member_adding"] = sys_settings.demo_access_member_adding
-            demo_limits["access_group_joiner"] = sys_settings.demo_access_group_joiner
-            demo_limits["access_group_scraping"] = sys_settings.demo_access_group_scraping
-            demo_limits["access_message_sender"] = sys_settings.demo_access_message_sender
-            demo_limits["access_terminal"] = sys_settings.demo_access_terminal
-            demo_limits["access_contacts_manager"] = sys_settings.demo_access_contacts_manager
-            demo_limits["access_reminders"] = sys_settings.demo_access_reminders
-            demo_limits["access_bot_hub"] = sys_settings.demo_access_bot_hub
-            demo_limits["access_folder_campaign"] = sys_settings.demo_access_folder_campaign
-            demo_limits["access_folder_scraper"] = sys_settings.demo_access_folder_scraper
-            demo_limits["access_creative_tools"] = sys_settings.demo_access_creative_tools
-            demo_limits["access_ban_checker"] = sys_settings.demo_access_ban_checker
-            demo_limits["can_auto_reply"] = sys_settings.demo_can_auto_reply
-            demo_limits["can_forward"] = sys_settings.demo_can_forward
-            demo_limits["can_react"] = sys_settings.demo_can_react
-        else:
-            # Fallback to hardcoded defaults if no settings in DB
-            demo_limits["max_proxies"] = 50
-            demo_limits["max_api_keys"] = 50
 
-    if not user.plan_id or is_in_trial:
-        is_demo = True
-    else:
-        # Check for expiry
+    # If user has a plan assigned, we MUST use the plan limits (is_demo = False)
+    # Even if they are technically in the first 7 days, the paid plan takes precedence.
+    if user.plan_id and user.plan_id != "null":
+        is_demo = False
+        
+        # Check for expiry of the paid plan
         if user.plan_expiry_at:
             from datetime import timezone
             now = datetime.now(timezone.utc)
@@ -181,7 +208,10 @@ async def check_plan_limit(user: User, field: str, current_count: Optional[int] 
                 expiry = expiry.replace(tzinfo=timezone.utc)
                 
             if now > expiry:
-                is_demo = True # Treat expired users as Demo users for core features
+                is_demo = True # Treat expired users as Demo users
+    else:
+        # No plan assigned, use Demo/Trial limits
+        is_demo = True
 
     if is_demo:
         if field in demo_limits:
@@ -200,15 +230,17 @@ async def check_plan_limit(user: User, field: str, current_count: Optional[int] 
                 raise HTTPException(status_code=403, detail=msg)
             return True
         
-        # If the user is in trial, allow access even if not in demo_limits (for missing boolean features)
+        # If the user is in trial, allow access for fields NOT explicitly in demo_limits
+        # NOTE: Fields that ARE in demo_limits have already been handled above and returned.
+        # This fallback only applies to fields with no explicit demo setting.
         if is_in_trial:
-            if field.startswith(("access_", "can_")):
-                return True
             if current_count is not None:
-                # If quantity field not specifically handled, allow a default trial limit of 1
+                # Unknown quantity field — allow a default trial limit of 1
                 if current_count >= 1:
                     raise HTTPException(status_code=403, detail="Trial limit reached. Please purchase a plan for full access.")
                 return True
+            # For unknown boolean access_ fields, block by default in trial
+            raise HTTPException(status_code=403, detail="Feature not available in trial. Please upgrade.")
             
         # If not a demo feature, block access
         if not user.plan_id:
@@ -224,6 +256,9 @@ async def check_plan_limit(user: User, field: str, current_count: Optional[int] 
         raise HTTPException(status_code=403, detail="Your current plan is inactive. Contact admin.")
 
     val = getattr(plan, field, None)
+    if val is None:
+        # Fallback to demo limit if plan doesn't have the field defined
+        val = demo_limits.get(field, 0)
 
     # ── Service Overrides Check ──────────────────────────────────────────────
     # If the user has manual force-enable/disable for the service corresponding to this field
@@ -242,7 +277,9 @@ async def check_plan_limit(user: User, field: str, current_count: Optional[int] 
         "access_reminders": "reminders",
         "access_bot_hub": "bot_hub",
         "max_bots": "bot_hub",
-        "access_group_joiner": "group_joiner"
+        "access_group_joiner": "group_joiner",
+        "max_ai_agents": "ai_agent",
+        "access_ai_agent": "ai_agent"
     }
     
     svc_id = service_map.get(field)

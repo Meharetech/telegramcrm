@@ -12,7 +12,8 @@ from app.models import (
     User, TelegramAccount, ForwarderRule, TelegramAPI, Reminder,
     Proxy, SystemLog, ReactionTask, MemberAddSettings, MemberAddJob,
     MemberAddSchedule, Plan, Payment, SystemSettings, BotForwarder,
-    WalletTransaction, ShopPurchase
+    WalletTransaction, ShopPurchase, AiAgent, AiKnowledgeSummary,
+    AiReplyLog, AiSettings
 )
 from app.models.auto_reply import AutoReplyRule, AutoReplySettings
 from app.models.folder_campaign import FolderCampaignJob
@@ -30,6 +31,7 @@ from app.api.wallet import router as wallet_router
 from app.api.shop import router as shop_router
 from app.api.accounts.otp_viewer import router as otp_viewer_router
 from app.api.folder_campaign import router as folder_campaign_router
+from app.api.ai_agent import router as ai_agent_router
 from contextlib import asynccontextmanager
 from app.client_cache import shutdown_all, start_maintenance
 from app.config import settings
@@ -232,7 +234,8 @@ async def lifespan(app: FastAPI):
                 User, TelegramAccount, AutoReplyRule, AutoReplySettings,
                 ForwarderRule, TelegramAPI, ReactionTask, Reminder, Proxy, SystemLog,
                 MemberAddSettings, MemberAddJob, MemberAddSchedule, MessageCampaignJob, MessageCampaignSchedule, Plan, Payment,
-                SystemSettings, BotForwarder, WalletTransaction, ShopPurchase, FolderCampaignJob, GroupJoinJob
+                SystemSettings, BotForwarder, WalletTransaction, ShopPurchase, FolderCampaignJob, GroupJoinJob,
+                AiAgent, AiKnowledgeSummary, AiReplyLog, AiSettings
             ]
         )
 
@@ -334,6 +337,7 @@ app.include_router(shop_router, prefix="/api/shop", tags=["Shop"])
 app.include_router(otp_viewer_router, prefix="/api/otp", tags=["OTP Viewer"])
 app.include_router(folder_campaign_router, prefix="/api/folder-campaign", tags=["Folder Campaign"])
 app.include_router(group_join_router, prefix="/api/group-join", tags=["Group Joiner"])
+app.include_router(ai_agent_router, prefix="/api/ai-agent", tags=["AI Agent"])
 app.include_router(ws_router,         prefix="/api",             tags=["WebSockets"])
 
 @app.get("/")

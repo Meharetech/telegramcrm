@@ -26,6 +26,8 @@ class Plan(Document):
     max_forwarder_channels: int = 0 # -1 = unlimited
     max_bots: int = 1               # -1 = unlimited
     max_folder_accounts: int = 1    # Number of accounts allowed to run folder campaigns
+    ai_chatbot_limit: int = -1      # Total AI replies allowed per cycle (-1 = unlimited)
+    max_ai_agents: int = 1         # Max number of accounts allowed to have an AI agent active
 
     # ── Feature Toggles ─────────────────────────────────────────────────────
     access_chat_message: bool = False      # Bulk/schedule message sending
@@ -42,6 +44,7 @@ class Plan(Document):
     access_folder_campaign: bool = False   # Folder Message Campaign
     access_folder_scraper: bool = False    # Folder Peer Scraper
     access_group_joiner: bool = False     # Group joiner tool
+    access_ai_agent: bool = False         # AI Chatbot Agent Access
 
     class Settings:
         name = "plans"

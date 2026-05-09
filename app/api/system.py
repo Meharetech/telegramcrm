@@ -129,6 +129,18 @@ async def start_all_services(options: StartOptions, current_user: User = Depends
                     active_list.append(f"Forwarder ({len(rules)} Rules)")
             except Exception: pass
 
+        # 3. Start AI Agent (independent — always active if configured)
+        try:
+            from app.models.ai_agent import AiAgent as AiAgentModel
+            from app.services.auto_reply.engine import _attached_handlers
+            ai_agent = await AiAgentModel.find_one(AiAgentModel.account_id == acc_id, AiAgentModel.is_active == True)
+            if ai_agent:
+                if acc_id not in _attached_handlers:
+                    client = await get_client(acc_id, acc.session_string, acc.api_id, acc.api_hash)
+                    await attach_handler(client, acc_id)
+                active_list.append("AI Agent 🤖")
+        except Exception: pass
+
         if active_list:
             summary = " | ".join(active_list)
             await terminal_manager.log_event(user_id, f"✅ STARTED for {acc.phone_number}: {summary}", acc_id, "system", "SUCCESS")
