@@ -3,7 +3,7 @@ from bson import ObjectId
 from typing import List, Optional
 from app.api.auth_utils import get_current_user
 from app.models import User, GroupJoinJob
-from app.services.group_join import GROUP_JOIN_TASKS, ActiveGroupJoiner
+from app.services.group_join import GROUP_JOIN_TASKS, GROUP_JOIN_MANAGERS, ActiveGroupJoiner, GroupJoinRotationManager
 import asyncio
 import json
 from sse_starlette.sse import EventSourceResponse
@@ -17,6 +17,7 @@ async def start_group_join(
     file: Optional[UploadFile] = File(None),
     links_text: Optional[str] = Form(None),
     task_type: str = Form("join"), # join, leave
+    join_mode: str = Form("rotation"), # rotation, mass
     current_user: User = Depends(get_current_user)
 ):
     user_id = str(current_user.id)
@@ -39,54 +40,61 @@ async def start_group_join(
     if not links:
         raise HTTPException(status_code=400, detail="No group links provided. Upload a file or enter manually.")
 
+    if len(links) > 50:
+        raise HTTPException(status_code=400, detail="Maximum 50 links allowed per operation for safety.")
+
+
     if user_id not in GROUP_JOIN_TASKS:
         GROUP_JOIN_TASKS[user_id] = {}
 
     import uuid
     batch_id = str(uuid.uuid4())[:8] # Small unique ID
-    started_count = 0
-    for acc_info in selected_accounts:
-        account_id = acc_info['id']
-        phone_number = acc_info['phone']
-        
-        if account_id in GROUP_JOIN_TASKS[user_id]:
-            if not GROUP_JOIN_TASKS[user_id][account_id].is_done:
-                continue # Skip busy accounts
 
-        task = ActiveGroupJoiner(
-            user_id=user_id,
-            account_id=account_id,
-            phone_number=phone_number,
-            links=links,
-            interval=interval,
-            batch_id=batch_id,
-            task_type=task_type
-        )
-        
-        if not current_user.services_active:
-            task.status = "running"
-            await task.sync_to_db()
-            started_count += 1
-            continue
+    manager = GroupJoinRotationManager(
+        user_id=user_id,
+        accounts_info=selected_accounts,
+        links=links,
+        interval=interval,
+        batch_id=batch_id,
+        task_type=task_type,
+        join_mode=join_mode
+    )
 
-        GROUP_JOIN_TASKS[user_id][account_id] = task
-        asyncio.create_task(task.run())
-        started_count += 1
 
     if not current_user.services_active:
-        return {"status": "success", "message": f"{started_count} tasks queued. Start Terminal to begin."}
+        # Just create the database records and mark as "waiting" or "running" but don't start
+        # The terminal service will likely start them later or the user will manual start
+        # For now, we'll follow the legacy logic of just syncing to DB
+        for task in manager.account_tasks.values():
+            task.status = "running"
+            await task.sync_to_db()
+        return {"status": "success", "message": f"{len(selected_accounts)} tasks queued. Start Terminal to begin."}
+
+    GROUP_JOIN_MANAGERS[user_id] = manager
+    asyncio.create_task(manager.run())
         
-    return {"status": "success", "message": f"Group joiner started on {started_count} accounts."}
+    return {"status": "success", "message": f"Group joiner started in rotation mode on {len(selected_accounts)} accounts."}
+
 
 @router.post("/stop")
 async def stop_group_join(account_id: str = Query(...), current_user: User = Depends(get_current_user)):
     user_id = str(current_user.id)
-    if user_id in GROUP_JOIN_TASKS and account_id in GROUP_JOIN_TASKS[user_id]:
-        task = GROUP_JOIN_TASKS[user_id][account_id]
-        task.stop_requested = True
-        task.is_manual_stop = True
-        return {"status": "success", "message": "Stop signal sent."}
-    return {"status": "error", "message": "No active task found."}
+    
+    # Stop the manager if it exists
+    if user_id in GROUP_JOIN_MANAGERS:
+        GROUP_JOIN_MANAGERS[user_id].stop_requested = True
+    
+    # Also stop individual tasks (for safety and legacy compatibility)
+    if user_id in GROUP_JOIN_TASKS:
+        if account_id == "all":
+            for task in GROUP_JOIN_TASKS[user_id].values():
+                task.stop_requested = True
+        elif account_id in GROUP_JOIN_TASKS[user_id]:
+            task = GROUP_JOIN_TASKS[user_id][account_id]
+            task.stop_requested = True
+            
+    return {"status": "success", "message": "Stop signal sent."}
+
 
 @router.get("/history")
 async def get_join_history(current_user: User = Depends(get_current_user)):
@@ -172,3 +180,31 @@ async def stream_group_join(account_id: str = Query(...), token: str = Query(...
                 task.queues.remove(queue)
 
     return EventSourceResponse(event_generator())
+
+@router.get("/stream-batch")
+async def stream_group_join_batch(token: str = Query(...)):
+    from app.api.auth_utils import get_user_from_token
+    user = await get_user_from_token(token)
+    if not user:
+        return EventSourceResponse([{"event": "error", "data": "Unauthorized"}])
+    
+    user_id = str(user.id)
+    manager = GROUP_JOIN_MANAGERS.get(user_id)
+    if not manager:
+        return EventSourceResponse([{"event": "error", "data": "No active batch process"}])
+
+    async def event_generator():
+        queue = asyncio.Queue()
+        async with manager.lock:
+            manager.batch_queues.append(queue)
+        
+        try:
+            while True:
+                msg = await queue.get()
+                yield msg
+        except:
+            if queue in manager.batch_queues:
+                manager.batch_queues.remove(queue)
+
+    return EventSourceResponse(event_generator())
+
