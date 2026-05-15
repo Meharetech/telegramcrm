@@ -10,8 +10,15 @@ from telethon.errors import (
     UsernameInvalidError, UsernameNotOccupiedError,
     PhoneNumberBannedError, UserRestrictedError,
     AuthKeyUnregisteredError, UserPrivacyRestrictedError,
+    UserNotMutualContactError, UserIsBlockedError,
+    YouBlockedUserError, InputUserDeactivatedError,
+    ChatWriteForbiddenError, UserBannedInChannelError,
+    SlowModeWaitError, ChatAdminRequiredError,
+    MessageTooLongError, MediaEmptyError,
+    MediaCaptionTooLongError, ChannelInvalidError,
     RPCError
 )
+from asyncio import TimeoutError
 from app.models import TelegramAccount, MessageCampaignJob
 from app.client_cache import get_client
 from app.services.terminal_service import terminal_manager
@@ -262,11 +269,11 @@ class ActiveMessageCampaign:
                     await self.add_log("error", "🛑 Task Aborted: User services were STOPPED by administrator.", "ERROR")
                     self.stop_requested = True
                     break
-
                 any_working = False
                 found_ready = False
                 
-                # Sort accounts by next_work_at to always pick the one that has waited longest
+                # Fair-rotation: Sort accounts by who has waited longest (smallest next_work_at)
+                # This ensures we don't keep hitting the first account in the list if it's ready.
                 self.accounts_to_use.sort(key=lambda x: x.get("next_work_at", 0))
 
                 for acc_task in self.accounts_to_use:
@@ -306,7 +313,8 @@ class ActiveMessageCampaign:
                     if not target: continue
                     
                     message_to_send = parse_spintax(self.message_text)
-                    await self.add_log("log", f"⏳ {acc_task['phone']} sending to {target}...", "INFO")
+                    await self.add_log("log", f"🚀 Account {acc_task['phone']} is taking its turn in rotation...", "INFO")
+                    await self.add_log("log", f"⏳ Preparing to message {target}...", "INFO")
                     
                     try:
                         # ── Connection Guard ──
@@ -346,64 +354,85 @@ class ActiveMessageCampaign:
                         })
                         await terminal_manager.log_event(self.user_id, f"✅ {acc_task['phone']} messaged {target} (Pending: {pending})", acc_task["acc_id"], "msg_campaign", "SUCCESS")
                     
-                    # ── Telegram Error Resilience ─────────────────────────────
+                    except (UserPrivacyRestrictedError, UserNotMutualContactError):
+                        await self.add_log("log", f"🛡️ Privacy: {target} blocks messages from strangers.", "WARNING")
+                    except UserIsBlockedError:
+                        await self.add_log("log", f"🚫 {target} has blocked Account {acc_task['phone']}.", "WARNING")
+                    except YouBlockedUserError:
+                        await self.add_log("log", f"⚠️ Account {acc_task['phone']} has blocked {target}.", "WARNING")
+                    except InputUserDeactivatedError:
+                        await self.add_log("log", f"💀 User {target} is deactivated.", "WARNING")
+                    except ChatWriteForbiddenError:
+                        await self.add_log("log", f"❌ {acc_task['phone']}: Cannot send messages in this chat.", "ERROR")
+                        acc_task["failed"] = True
+                    except UserBannedInChannelError:
+                        await self.add_log("log", f"❌ {acc_task['phone']} is banned from {target}.", "ERROR")
+                        acc_task["failed"] = True
+                    except SlowModeWaitError as e:
+                        await self.add_log("log", f"⏳ Slow mode active: Must wait {e.seconds}s.", "WARNING")
+                        acc_task["next_work_at"] = time.time() + e.seconds
+                        if self.method == 'username' and target:
+                            self.global_username_queue.insert(0, target)
+                        continue
+                    except ChatAdminRequiredError:
+                        await self.add_log("log", f"❌ {acc_task['phone']}: Admin rights required for this action.", "ERROR")
+                        acc_task["failed"] = True
                     except FloodWaitError as e:
                         acc_task["last_error_msg"] = f"FloodWait ({e.seconds}s)"
                         if e.seconds > 300: 
                             acc_task["failed"] = True
                             db_acc.flood_wait_until = datetime.now(timezone.utc) + timedelta(seconds=e.seconds)
                             await db_acc.save()
-                            await self.add_log("log", f"⚠️ High FloodWait. Stopping {acc_task['phone']}.", "ERROR")
+                            await self.add_log("log", f"⚠️ High FloodWait ({e.seconds}s). Stopping {acc_task['phone']}.", "ERROR")
                         else:
-                            await self.add_log("log", f"⏳ Short FloodWait ({e.seconds}s) for {acc_task['phone']}. Cooling down.", "WARNING")
+                            await self.add_log("log", f"⏳ Short FloodWait ({e.seconds}s) for {acc_task['phone']}. Skipping turn.", "WARNING")
                             acc_task["next_work_at"] = time.time() + e.seconds
-                            # Put target back so someone else can take it
                             if self.method == 'username' and target:
                                 self.global_username_queue.insert(0, target)
-                            elif self.method == 'contact' and target:
-                                acc_task["targets"].insert(0, {"id": target, "username": "", "phone": ""})
                             continue 
+                    except UserRestrictedError:
+                        acc_task["failed"] = True
+                        acc_task["last_error_msg"] = "Account Restricted"
+                        await self.add_log("log", f"🔴 {acc_task['phone']} restricted by Telegram.", "ERROR")
                     except PeerFloodError:
                         acc_task["failed"] = True
                         acc_task["last_error_msg"] = "PeerFlood (Spam Warning)"
                         db_acc.flood_wait_until = datetime.now(timezone.utc) + timedelta(hours=24)
                         await db_acc.save()
-                        await self.add_log("log", f"🔴 PeerFlood on {acc_task['phone']}. Account restricted.", "ERROR")
+                        await self.add_log("log", f"🔴 PeerFlood on {acc_task['phone']}. Account restricted for 24h.", "ERROR")
                     except (PhoneNumberBannedError, AuthKeyUnregisteredError):
                         acc_task["failed"] = True
                         acc_task["last_error_msg"] = "BANNED/EXPIRED"
                         db_acc.is_active = False
                         await db_acc.save()
-                        await self.add_log("log", f"❌ {acc_task['phone']} is banned/expired.", "ERROR")
+                        await self.add_log("log", f"❌ {acc_task['phone']} is banned or session expired.", "ERROR")
+                    except (UsernameInvalidError, UsernameNotOccupiedError, ChannelInvalidError, PeerIdInvalidError):
+                        await self.add_log("log", f"⚠️ Invalid Target: {target}. Skipping.", "WARNING")
+                    except (MessageTooLongError, MediaEmptyError, MediaCaptionTooLongError):
+                        await self.add_log("log", f"❌ Message Error: Content invalid or too long. Aborting account task.", "ERROR")
+                        acc_task["failed"] = True
+                    except (TimeoutError, ConnectionError):
+                        await self.add_log("log", f"🔄 Connection issue with {acc_task['phone']}. Skipping turn.", "WARNING")
+                        acc_task["next_work_at"] = time.time() + 30
+                        if self.method == 'username' and target:
+                            self.global_username_queue.insert(0, target)
+                        continue
                     except RPCError as e:
                         err_str = str(e)
-                        if any(x in err_str for x in ["CHAT_MEMBER_ADD_FAILED", "PEER_FLOOD", "USER_BANNED_IN_CHANNEL"]):
+                        if any(x in err_str for x in ["PEER_FLOOD", "USER_BANNED_IN_CHANNEL", "CHAT_WRITE_FORBIDDEN"]):
                             acc_task["failed"] = True
-                            acc_task["last_error_msg"] = "Limit Hit (24h)"
-                            db_acc.flood_wait_until = datetime.now(timezone.utc) + timedelta(hours=24)
-                            await db_acc.save()
-                            await self.add_log("log", f"🔴 {acc_task['phone']}: Critical Error ({err_str}). Account stopped for 24h.", "ERROR")
-                            # Put target back
-                            if self.method == 'username' and target:
-                                self.global_username_queue.insert(0, target)
-                            elif self.method == 'contact' and target:
-                                acc_task["targets"].insert(0, {"id": target, "username": "", "phone": ""})
+                            acc_task["last_error_msg"] = "Limit Hit"
+                            await self.add_log("log", f"🔴 {acc_task['phone']}: Critical Error ({err_str}).", "ERROR")
                         else:
                             self.errors_count += 1
                             await self.add_log("log", f"❌ RPC Error: {err_str}", "ERROR")
-                        acc_task["last_error_msg"] = str(e)
-                        await self.add_log("log", f"❌ Error: {str(e)}", "ERROR")
-                        if "privacy" in str(e).lower():
-                            acc_task["next_work_at"] = time.time() + 60 
+                        if self.method == 'username' and target:
+                            self.global_username_queue.insert(0, target)
                     except Exception as e:
                         self.errors_count += 1
                         await self.add_log("log", f"❌ Unexpected Error with {acc_task['phone']}: {str(e)}", "ERROR")
-                        # Put target back if it failed
                         if self.method == 'username' and target:
                             self.global_username_queue.insert(0, target)
-                        elif self.method == 'contact' and target:
-                            # Re-add to this account's local targets
-                            acc_task["targets"].insert(0, {"id": target, "username": "", "phone": ""})
 
                     # Per-step cooldown
                     delay = random.randint(min_d, max_d)

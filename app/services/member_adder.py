@@ -19,8 +19,11 @@ from telethon.errors import (
     ChannelPrivateError, ChannelInvalidError,
     InviteHashExpiredError, InviteHashInvalidError,
     PeerIdInvalidError, UsernameInvalidError,
-    UsernameNotOccupiedError, RPCError
+    UsernameNotOccupiedError, UserIsBlockedError,
+    YouBlockedUserError, SlowModeWaitError, RPCError
 )
+import asyncio
+from asyncio import TimeoutError
 from app.models import TelegramAccount, MemberAddSettings, MemberAddJob
 from app.client_cache import get_client
 from app.services.terminal_service import terminal_manager
@@ -316,217 +319,226 @@ class ActiveMemberAdder:
             await self.add_log("status", f"📂 Mission ready: {self.total_count} additions planned using {len(self.accounts_to_use)} accounts.", "SUCCESS", data={"total": self.total_count})
             await terminal_manager.log_event(self.user_id, f"📂 Member adding mission started. Total targets: {self.total_count}.", module="member_adder", level="INFO")
 
-            # ── Step 5: Batch-Based Rotation Loop ─────────────────────────────
+            # ── Step 5: Sequential Rotation Loop ─────────────────────────────
             import time
             
-            # Split accounts into batches
-            batch_size = max(1, self.batch_size)
-            batches = [self.accounts_to_use[i:i + batch_size] for i in range(0, len(self.accounts_to_use), batch_size)]
-            
-            if len(batches) > 1:
-                await self.add_log("log", f"📦 Mission split into {len(batches)} batches of {batch_size} accounts.", "INFO")
+            for acc in self.accounts_to_use:
+                acc["next_work_at"] = 0
 
-            for b_idx, current_batch in enumerate(batches):
-                if self.stop_requested: break
-                
-                if len(batches) > 1:
-                    await self.add_log("status", f"🔄 Starting Batch {b_idx + 1}/{len(batches)}...")
+            while self.done_count < self.total_count and not self.stop_requested:
+                # Real-time admin stop check
+                from app.client_cache import is_user_active
+                if not await is_user_active(self.user_id):
+                    self.stop_requested = True
+                    await self.add_log("error", "🛑 Mission Aborted: Services deactivated by administrator.", "ERROR")
+                    break
 
-                for acc in current_batch:
-                    acc["next_work_at"] = 0
+                any_working = False
+                any_ready = False
 
-                while not self.stop_requested:
-                    # Real-time admin stop check
-                    from app.client_cache import is_user_active
-                    if not await is_user_active(self.user_id):
-                        self.stop_requested = True
-                        await self.add_log("error", "🛑 Mission Aborted: Services deactivated by administrator.", "ERROR")
-                        break
+                for acc_task in self.accounts_to_use:
+                    if self.stop_requested: break
+                    if acc_task["failed"]: continue
+                    
+                    # Check account-specific target limit for THIS mission
+                    if acc_task["this_task_done"] >= acc_task["target_count"]:
+                        if not acc_task.get("logged_done"):
+                            await self.add_log("log", f"🎯 {acc_task['phone']} goal reached. Retiring.", "INFO")
+                            acc_task["logged_done"] = True
+                        continue
 
-                    any_working_in_batch = False
-                    any_ready_in_batch = False
+                    # If custom list, check if mission queue is empty
+                    if self.source_type == "custom_list" and not self.mission_queue:
+                        continue
 
-                    for acc_task in current_batch:
+                    # If contacts mode, check if account list is empty
+                    if self.source_type == "contacts" and not acc_task["contacts"]:
+                        continue
+
+                    any_working = True
+                    now = time.time()
+                    if now < acc_task.get("next_work_at", 0):
+                        continue  # Still in delay
+
+                    any_ready = True
+                    db_acc = acc_task["db_acc"]
+                    
+                    # Get next target
+                    if self.source_type == "custom_list":
+                        target = self.mission_queue.pop(0)
+                    else:
+                        target = acc_task["contacts"].pop(0)
+
+                    # Determine display label
+                    if target["username"]:
+                        id_label = f"@{target['username']}"
+                        user_input = target["username"]
+                    elif isinstance(target["id"], int):
+                        id_label = f"ID:{target['id']}"
+                        user_input = target["id"]
+                    elif target["phone"]:
+                        id_label = f"+{target['phone']}"
+                        user_input = target["phone"]
+                    else:
+                        id_label = str(target["id"])
+                        user_input = target["id"]
+
+                    await self.add_log("log", f"🚀 Account {acc_task['phone']} is taking its turn in rotation...", "INFO")
+                    await self.add_log("log", f"⏳ Preparing to add {id_label}...", "INFO")
+
+                    try:
+                        from app.client_cache import touch
+                        touch(acc_task["acc_id"])
+                        
+                        if not acc_task["client"].is_connected():
+                            await self.add_log("log", f"🔄 {acc_task['phone']} disconnected. Reconnecting...", "WARNING")
+                            acc_task["client"] = await get_client(acc_task["acc_id"])
+
                         if self.stop_requested: break
-                        if acc_task["failed"]: continue
                         
-                        # Check account-specific target limit for THIS mission
-                        if acc_task["this_task_done"] >= acc_task["target_count"]:
-                            if not acc_task.get("logged_done"):
-                                await self.add_log("log", f"🎯 {acc_task['phone']} goal reached. Retiring.", "INFO")
-                                acc_task["logged_done"] = True
-                            continue
-
-                        # If custom list, check if mission queue is empty
-                        if self.source_type == "custom_list" and not self.mission_queue:
-                            continue
-
-                        # If contacts mode, check if account list is empty
-                        if self.source_type == "contacts" and not acc_task["contacts"]:
-                            continue
-
-                        any_working_in_batch = True
-                        now = time.time()
-                        if now < acc_task.get("next_work_at", 0):
-                            continue  # Still in delay
-
-                        any_ready_in_batch = True
-                        db_acc = acc_task["db_acc"]
-                        
-                        # Get next target
-                        if self.source_type == "custom_list":
-                            target = self.mission_queue.pop(0)
-                        else:
-                            target = acc_task["contacts"].pop(0)
-
-                        # Determine display label
-                        if target["username"]:
-                            id_label = f"@{target['username']}"
-                            user_input = target["username"]
-                        elif isinstance(target["id"], int):
-                            id_label = f"ID:{target['id']}"
-                            user_input = target["id"]
-                        elif target["phone"]:
-                            id_label = f"+{target['phone']}"
-                            user_input = target["phone"]
-                        else:
-                            id_label = str(target["id"])
-                            user_input = target["id"]
-
-                        await self.add_log("log", f"⏳ {acc_task['phone']} → {id_label}...", "INFO")
-
                         try:
-                            from app.client_cache import touch
-                            touch(acc_task["acc_id"])
-                            
-                            if not acc_task["client"].is_connected():
-                                await self.add_log("log", f"🔄 {acc_task['phone']} disconnected. Reconnecting...", "WARNING")
-                                acc_task["client"] = await get_client(acc_task["acc_id"])
-
-                            if self.stop_requested: break
-                            if self.stop_requested: break
-                            
+                            resolved = await acc_task["client"].get_input_entity(user_input)
+                        except (ValueError, PeerIdInvalidError):
+                            # Fallback to slower but more robust get_entity
                             try:
-                                resolved = await acc_task["client"].get_input_entity(user_input)
-                            except (ValueError, PeerIdInvalidError):
-                                # Fallback to slower but more robust get_entity
-                                try:
-                                    entity = await acc_task["client"].get_entity(user_input)
-                                    resolved = await acc_task["client"].get_input_entity(entity)
-                                except Exception as e:
-                                    await self.add_log("log", f"⚠️ Could not find {id_label}: {str(e)}", "WARNING")
-                                    continue
-
-                            if not isinstance(resolved, (types.InputPeerUser, types.InputUserSelf, types.InputPeerUserFromMessage)):
-                                await self.add_log("log", f"⚠️ Skipping {id_label}: Not a user (Type: {type(resolved).__name__})", "WARNING")
+                                entity = await acc_task["client"].get_entity(user_input)
+                                resolved = await acc_task["client"].get_input_entity(entity)
+                            except Exception as e:
+                                await self.add_log("log", f"⚠️ Could not find {id_label}: {str(e)}", "WARNING")
                                 continue
 
-                            if self.stop_requested: break
-                            await acc_task["client"](functions.channels.InviteToChannelRequest(
-                                channel=acc_task["target_group"],
-                                users=[resolved]
-                            ))
+                        if not isinstance(resolved, (types.InputPeerUser, types.InputUserSelf, types.InputPeerUserFromMessage)):
+                            await self.add_log("log", f"⚠️ Skipping {id_label}: Not a user (Type: {type(resolved).__name__})", "WARNING")
+                            continue
 
-                            self.done_count += 1
-                            acc_task["this_task_done"] += 1
-                            acc_task["consecutive_privacy_errors"] = 0
-                            progress_str = f"[{acc_task['this_task_done']}/{acc_task['target_count']}]"
-                            await self.add_log("progress", f"✅ {acc_task['phone']} {progress_str} added {id_label}", "SUCCESS", data={
-                                "acc_id": acc_task["acc_id"],
-                                "contacts_added_today": db_acc.contacts_added_today,
-                                "done": self.done_count,
-                                "added": 1
-                            })
-                            db_acc.contacts_added_today += 1
-                            db_acc.last_contact_add_date = datetime.now(timezone.utc)
-                            await db_acc.save()
-                            await terminal_manager.log_event(self.user_id, f"✅ {acc_task['phone']} added {id_label}", acc_task["acc_id"], "member_adder", "SUCCESS")
+                        if self.stop_requested: break
+                        await acc_task["client"](functions.channels.InviteToChannelRequest(
+                            channel=acc_task["target_group"],
+                            users=[resolved]
+                        ))
 
-                        except ChatAdminRequiredError:
-                            await self.add_log("log", f"❌ {acc_task['phone']}: Admin permission required for this group.", "ERROR")
-                            acc_task["failed"] = True # Stop this account, it can't add anyone here
+                        self.done_count += 1
+                        acc_task["this_task_done"] += 1
+                        acc_task["consecutive_privacy_errors"] = 0
+                        progress_str = f"[{acc_task['this_task_done']}/{acc_task['target_count']}]"
+                        await self.add_log("progress", f"✅ {acc_task['phone']} {progress_str} added {id_label}", "SUCCESS", data={
+                            "acc_id": acc_task["acc_id"],
+                            "contacts_added_today": db_acc.contacts_added_today,
+                            "done": self.done_count,
+                            "added": 1
+                        })
+                        db_acc.contacts_added_today += 1
+                        db_acc.last_contact_add_date = datetime.now(timezone.utc)
+                        await db_acc.save()
+                        await terminal_manager.log_event(self.user_id, f"✅ {acc_task['phone']} added {id_label}", acc_task["acc_id"], "member_adder", "SUCCESS")
 
-                        except (UserPrivacyRestrictedError, UserNotMutualContactError):
-                            acc_task["consecutive_privacy_errors"] += 1
-                            acc_task["last_error_msg"] = "Privacy Restricted"
-                            await self.add_log("log", f"ℹ️ Privacy restricted: {id_label}", "WARNING")
-                            if acc_task["consecutive_privacy_errors"] >= m_settings.consecutive_privacy_threshold:
-                                acc_task["failed"] = True
-                                await self.add_log("log", f"⚠️ {acc_task['phone']} hit privacy threshold. Retired.", "ERROR")
-
-                        except UserAlreadyParticipantError:
-                            await self.add_log("log", f"ℹ️ Already in group: {id_label}", "WARNING")
-
-                        except (UsernameNotOccupiedError, UsernameInvalidError, UserIdInvalidError, PeerIdInvalidError):
-                            await self.add_log("log", f"⚠️ Invalid/not found: {id_label}. Skipping.", "WARNING")
-
-                        except FloodWaitError as e:
-                            acc_task["last_error_msg"] = f"FloodWait ({e.seconds}s)"
-                            if e.seconds > m_settings.max_flood_sleep_threshold:
-                                acc_task["failed"] = True
-                                db_acc.flood_wait_until = datetime.now(timezone.utc) + timedelta(seconds=e.seconds)
-                                await db_acc.save()
-                                await self.add_log("log", f"⚠️ High FloodWait ({e.seconds}s). Retired.", "ERROR")
-                            else:
-                                await self.add_log("log", f"⏳ Short FloodWait ({e.seconds}s). Sleeping...", "WARNING")
-                                await asyncio.sleep(e.seconds)
-
-                        except PeerFloodError:
+                    except (UserPrivacyRestrictedError, UserNotMutualContactError):
+                        acc_task["consecutive_privacy_errors"] += 1
+                        acc_task["last_error_msg"] = "Privacy Restricted"
+                        await self.add_log("log", f"ℹ️ Privacy restricted: {id_label}", "WARNING")
+                        if acc_task["consecutive_privacy_errors"] >= m_settings.consecutive_privacy_threshold:
                             acc_task["failed"] = True
-                            acc_task["last_error_msg"] = "PeerFlood"
+                            await self.add_log("log", f"⚠️ {acc_task['phone']} hit privacy threshold. Retired.", "ERROR")
+                    
+                    except UserIsBlockedError:
+                        await self.add_log("log", f"🚫 {id_label} has blocked Account {acc_task['phone']}.", "WARNING")
+                    except YouBlockedUserError:
+                        await self.add_log("log", f"⚠️ Account {acc_task['phone']} has blocked {id_label}.", "WARNING")
+                    except InputUserDeactivatedError:
+                        await self.add_log("log", f"💀 User {id_label} is deactivated.", "WARNING")
+                    
+                    except ChatWriteForbiddenError:
+                        await self.add_log("log", f"❌ {acc_task['phone']}: Cannot write to this group.", "ERROR")
+                        acc_task["failed"] = True
+                    except UserBannedInChannelError:
+                        await self.add_log("log", f"❌ {acc_task['phone']} is banned from group.", "ERROR")
+                        acc_task["failed"] = True
+                    except SlowModeWaitError as e:
+                        await self.add_log("log", f"⏳ Slow mode: Must wait {e.seconds}s.", "WARNING")
+                        acc_task["next_work_at"] = time.time() + e.seconds
+                    except ChatAdminRequiredError:
+                        await self.add_log("log", f"❌ {acc_task['phone']}: Admin rights required.", "ERROR")
+                        acc_task["failed"] = True
+
+                    except UserAlreadyParticipantError:
+                        await self.add_log("log", f"ℹ️ Already in group: {id_label}", "WARNING")
+
+                    except (UsernameNotOccupiedError, UsernameInvalidError, UserIdInvalidError, PeerIdInvalidError):
+                        await self.add_log("log", f"⚠️ Invalid/not found: {id_label}. Skipping.", "WARNING")
+
+                    except FloodWaitError as e:
+                        acc_task["last_error_msg"] = f"FloodWait ({e.seconds}s)"
+                        if e.seconds > m_settings.max_flood_sleep_threshold:
+                            acc_task["failed"] = True
+                            db_acc.flood_wait_until = datetime.now(timezone.utc) + timedelta(seconds=e.seconds)
+                            await db_acc.save()
+                            await self.add_log("log", f"⚠️ High FloodWait ({e.seconds}s). Account Retired.", "ERROR")
+                        else:
+                            await self.add_log("log", f"⏳ Short FloodWait ({e.seconds}s). Skipping turn.", "WARNING")
+                            acc_task["next_work_at"] = time.time() + e.seconds
+
+                    except PeerFloodError:
+                        acc_task["failed"] = True
+                        acc_task["last_error_msg"] = "PeerFlood"
+                        db_acc.flood_wait_until = datetime.now(timezone.utc) + timedelta(hours=24)
+                        await db_acc.save()
+                        await self.add_log("log", f"🔴 PeerFlood on {acc_task['phone']}. 24h cooldown.", "ERROR")
+
+                    except (UserRestrictedError, UserKickedError):
+                        acc_task["failed"] = True
+                        acc_task["last_error_msg"] = "Account Restricted"
+                        await self.add_log("log", f"🔴 {acc_task['phone']} restricted by Telegram. Retired.", "ERROR")
+
+                    except PhoneNumberBannedError:
+                        acc_task["failed"] = True
+                        acc_task["last_error_msg"] = "BANNED"
+                        db_acc.is_active = False
+                        db_acc.status = "banned"
+                        await db_acc.save()
+                        await self.add_log("log", f"❌ PERMANENT BAN: {acc_task['phone']}.", "ERROR")
+
+                    except AuthKeyUnregisteredError:
+                        acc_task["failed"] = True
+                        acc_task["last_error_msg"] = "Session Expired"
+                        db_acc.is_active = False
+                        db_acc.status = "error"
+                        await db_acc.save()
+                        await self.add_log("log", f"❌ SESSION EXPIRED: {acc_task['phone']}.", "ERROR")
+
+                    except (UserDeletedError, UserDeactivatedError):
+                        await self.add_log("log", f"ℹ️ Target deleted: {id_label}", "WARNING")
+
+                    except (TimeoutError, ConnectionError):
+                        await self.add_log("log", f"🔄 Connection issue with {acc_task['phone']}. Skipping turn.", "WARNING")
+                        acc_task["next_work_at"] = time.time() + 30
+
+                    except RPCError as e:
+                        err_str = str(e)
+                        if "CHAT_MEMBER_ADD_FAILED" in err_str:
+                            acc_task["failed"] = True
+                            acc_task["last_error_msg"] = "Add Failed"
                             db_acc.flood_wait_until = datetime.now(timezone.utc) + timedelta(hours=24)
                             await db_acc.save()
-                            await self.add_log("log", f"🔴 PeerFlood on {acc_task['phone']}. 24h cooldown.", "ERROR")
-
-                        except (UserRestrictedError, UserBannedInChannelError, UserKickedError):
-                            acc_task["failed"] = True
-                            acc_task["last_error_msg"] = "Account Restricted"
-                            await self.add_log("log", f"🔴 {acc_task['phone']} restricted by Telegram. Retired.", "ERROR")
-
-                        except PhoneNumberBannedError:
-                            acc_task["failed"] = True
-                            acc_task["last_error_msg"] = "BANNED"
-                            db_acc.is_active = False
-                            db_acc.status = "banned"
-                            await db_acc.save()
-                            await self.add_log("log", f"❌ PERMANENT BAN: {acc_task['phone']}.", "ERROR")
-
-                        except AuthKeyUnregisteredError:
-                            acc_task["failed"] = True
-                            acc_task["last_error_msg"] = "Session Expired"
-                            db_acc.is_active = False
-                            db_acc.status = "error"
-                            await db_acc.save()
-                            await self.add_log("log", f"❌ SESSION EXPIRED: {acc_task['phone']}.", "ERROR")
-
-                        except (UserDeletedError, UserDeactivatedError, InputUserDeactivatedError):
-                            await self.add_log("log", f"ℹ️ Target deleted/deactivated: {id_label}", "WARNING")
-
-                        except RPCError as e:
-                            err_str = str(e)
-                            if "CHAT_MEMBER_ADD_FAILED" in err_str:
-                                acc_task["failed"] = True
-                                acc_task["last_error_msg"] = "Add Failed"
-                                db_acc.flood_wait_until = datetime.now(timezone.utc) + timedelta(hours=24)
-                                await db_acc.save()
-                                await self.add_log("log", f"🔴 {acc_task['phone']}: CHAT_MEMBER_ADD_FAILED (24h cooldown).", "ERROR")
-                            else:
-                                self.errors_count += 1
-                                await self.add_log("log", f"❌ RPC Error: {err_str}", "ERROR")
-
-                        except Exception as e:
+                            await self.add_log("log", f"🔴 {acc_task['phone']}: Limit reached (24h cooldown).", "ERROR")
+                        else:
                             self.errors_count += 1
-                            await self.add_log("log", f"❌ Unexpected error: {str(e)}", "ERROR")
+                            await self.add_log("log", f"❌ RPC Error: {err_str}", "ERROR")
 
-                        # Per-step delay
-                        delay = random.randint(self.min_delay, self.max_delay)
-                        acc_task["next_work_at"] = time.time() + delay
-                        await asyncio.sleep(0.3)
+                    except Exception as e:
+                        self.errors_count += 1
+                        await self.add_log("log", f"❌ Unexpected error with {acc_task['phone']}: {str(e)}", "ERROR")
 
-                    if not any_working_in_batch:
-                        break # Batch exhausted
-                    if not any_ready_in_batch:
-                        await asyncio.sleep(0.1)
+                    # Per-step delay
+                    delay = random.randint(self.min_delay, self.max_delay)
+                    acc_task["next_work_at"] = time.time() + delay
+                    
+                    # Break inner loop to ensure strictly sequential processing across the fleet
+                    break
+
+                if not any_working:
+                    break # All accounts hit limits or targets finished
+                if not any_ready:
+                    await asyncio.sleep(0.1)
 
             # ── Step 6: Mission Summary ────────────────────────────────────────
             if self.stop_requested:

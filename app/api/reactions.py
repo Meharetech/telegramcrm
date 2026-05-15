@@ -16,6 +16,7 @@ class ReactionRequest(BaseModel):
     account_ids: List[str]
     min_delay: int = 5
     max_delay: int = 15
+    with_views: bool = False
 
 @router.get("/stats")
 async def get_reaction_stats(user=Depends(get_current_user)):
@@ -80,6 +81,7 @@ async def start_reaction_task(req: ReactionRequest, background_tasks: Background
         account_ids=req.account_ids,
         min_delay=req.min_delay,
         max_delay=req.max_delay,
+        with_views=req.with_views,
         status="pending"
     )
     await task.insert()
@@ -116,6 +118,7 @@ async def update_reaction_task(task_id: str, req: ReactionRequest, background_ta
     task.account_ids = req.account_ids
     task.min_delay = req.min_delay
     task.max_delay = req.max_delay
+    task.with_views = req.with_views
     task.status = "pending"
     task.is_active = True
     await task.save()

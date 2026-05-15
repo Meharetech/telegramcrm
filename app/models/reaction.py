@@ -29,6 +29,8 @@ class ReactionTask(Document):
     min_delay: int = 5           # seconds
     max_delay: int = 20          # seconds
     
+    with_views: bool = False     # Toggle to also increment post views
+    
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 

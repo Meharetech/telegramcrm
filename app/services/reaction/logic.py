@@ -16,7 +16,7 @@ import random
 import logging
 from datetime import datetime
 from telethon import events
-from telethon.tl.functions.messages import SendReactionRequest, ImportChatInviteRequest
+from telethon.tl.functions.messages import SendReactionRequest, ImportChatInviteRequest, GetMessagesViewsRequest
 from telethon.tl.types import ReactionEmoji, Channel, Chat
 from app.client_cache import get_client
 from app.models.account import TelegramAccount
@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 _reaction_handlers: dict = {}
 
 
-async def execute_reaction_boost(task_id: str):
+async def execute_reaction_boost(task_id: str, skip_join: bool = False):
     """
     Dispatcher for reaction tasks. Supports one-time boosts and continuous monitoring.
     """
@@ -39,9 +39,16 @@ async def execute_reaction_boost(task_id: str):
     if not task:
         return
 
-    # ── NEW: Bulk Join Phase ──────────────────────────────────────────
-    # User requested: "make first join group all id first"
-    await bulk_join_all_nodes(task)
+    from app.services.terminal_service import terminal_manager
+    await terminal_manager.log_event(task.user_id, f"🚀 STARTING: Reaction sequence for {task.target_link}...", "SYSTEM", "reaction", "INFO")
+
+    # ── Bulk Join Phase ──
+    if not skip_join:
+        await bulk_join_all_nodes(task)
+    else:
+        logger.info(f"[reaction] Skipping bulk join for task {task_id} (Resumed from startup)")
+    
+    await terminal_manager.log_event(task.user_id, f"🔄 PHASE 2: Setup complete. Starting reactions...", "SYSTEM", "reaction", "INFO")
 
     if task.task_type == "one_time":
         await run_one_time_boost(task)
@@ -52,24 +59,42 @@ async def run_one_time_boost(task: ReactionTask):
     task.status = "running"
     await task.save()
 
-    for account_id in task.account_ids:
-        # Check for cancellation
-        current_task = await ReactionTask.get(str(task.id))
-        if not current_task or current_task.status == "cancelled":
-            break
+    # Semaphore to prevent overwhelming local network/proxies
+    semaphore = asyncio.Semaphore(10)
 
-        success = await send_single_reaction(account_id, task.target_link, task.message_id, task.emojis)
-        
-        if success:
-            task.processed_accounts.append(account_id)
-        else:
-            task.failed_accounts.append({"id": account_id, "error": "Reaction failed"})
-        
+    async def single_boost_node(account_id):
+        async with semaphore:
+            # Individual random delay for organic spread
+            await asyncio.sleep(random.randint(task.min_delay, task.max_delay))
+            
+            # Check for cancellation mid-wait
+            current_task = await ReactionTask.get(str(task.id))
+            if not current_task or current_task.status == "cancelled":
+                return
+
+            success, is_dead = await send_single_reaction(account_id, task.target_link, task.message_id, task.emojis, task.with_views)
+            
+            # Update task state (Reload to avoid overwriting other parallel updates)
+            refreshed = await ReactionTask.get(str(task.id))
+            if not refreshed: return
+
+            if success:
+                refreshed.processed_accounts.append(account_id)
+            else:
+                refreshed.failed_accounts.append({"id": account_id, "error": "Reaction failed" + (" (Account Dead)" if is_dead else "")})
+                if is_dead and account_id in refreshed.account_ids:
+                    logger.warning(f"[reaction] Removing dead account {account_id} from task {task.id}")
+                    refreshed.account_ids.remove(account_id)
+            
+            await refreshed.save()
+
+    # Execute all nodes in parallel (staggered by their individual delays)
+    await asyncio.gather(*(single_boost_node(aid) for aid in task.account_ids))
+
+    task = await ReactionTask.get(str(task.id))
+    if task:
+        task.status = "completed" if not task.failed_accounts else "partially_completed"
         await task.save()
-        await asyncio.sleep(random.randint(task.min_delay, task.max_delay))
-
-    task.status = "completed" if not task.failed_accounts else "partially_completed"
-    await task.save()
 
 async def start_continuous_monitor(task: ReactionTask):
     """
@@ -80,150 +105,178 @@ async def start_continuous_monitor(task: ReactionTask):
     task.status = "monitoring"
     await task.save()
 
-    # We use the FIRST account as the 'Listener'
-    listener_id = task.account_ids[0]
-    listener_acc = await TelegramAccount.get(listener_id)
-    if not listener_acc:
-        task.status = "failed"
-        await task.save()
-        return
+    # ── SELF-HEALING: Listener Failover Loop ──
+    # If the current listener fails, we pick the next one and try again.
+    while True:
+        current_task = await ReactionTask.get(task_id_str)
+        if not current_task or not current_task.is_active or current_task.status == "cancelled":
+            return
 
-    try:
-        client = await get_client(
-            listener_id, 
-            listener_acc.session_string, 
-            listener_acc.api_id, 
-            listener_acc.api_hash
-        )
+        if not current_task.account_ids:
+            logger.error(f"[reaction] Task {task.id} has no accounts left. Failing.")
+            current_task.status = "failed"
+            await current_task.save()
+            return
 
-        # ── FIX: Remove stale handler from previous run/update ────────────────
-        if task_id_str in _reaction_handlers:
-            try:
-                client.remove_event_handler(_reaction_handlers[task_id_str])
-                logger.info(f"[reaction] Removed old handler for task {task_id_str}")
-            except Exception:
-                pass
-            del _reaction_handlers[task_id_str]
-
-        actual_target = task.target_link
-        if "://" in actual_target:
-            actual_target = actual_target.split("://")[-1]
-
-        listen_chat = actual_target
-        if "t.me/" in actual_target and not "joinchat" in actual_target and not "+" in actual_target:
-            parts = actual_target.split("/")
-            if len(parts) >= 3 and parts[-1].isdigit():
-                listen_chat = parts[-2]
-            else:
-                listen_chat = parts[-1]
+        listener_id = current_task.account_ids[0]
+        listener_acc = await TelegramAccount.get(listener_id)
         
-        if "joinchat" in actual_target or "+" in actual_target:
-            try: await ensure_joined_robust(client, task.target_link)
-            except: pass
-            
+        if not listener_acc:
+            logger.warning(f"[reaction] Listener {listener_id} not found in DB. Skipping.")
+            current_task.account_ids.pop(0)
+            await current_task.save()
+            continue
+
         try:
-            # Resolve the accurate entity ID for Telethon 'chats' filter
-            entity = await client.get_entity(task.target_link if ("joinchat" in actual_target or "+" in actual_target) else listen_chat)
-            listen_chat = entity.id
-        except Exception as e:
-            logger.warning(f"Could not preemptively resolve entity for {task.target_link}: {e}")
+            client = await get_client(
+                listener_id, 
+                listener_acc.session_string, 
+                listener_acc.api_id, 
+                listener_acc.api_hash
+            )
 
-        @client.on(events.NewMessage())
-        async def handler(event):
-            # Check if user services are active
-            from app.client_cache import is_user_active
-            if not await is_user_active(task.user_id):
-                return
-
-            # Manually filter the chat to ensure 100% intercept rate
-            chat = await event.get_chat()
-            if not chat: return
-
-            # Check if event chat matches our target
-            event_id = getattr(chat, 'id', None)
-            event_username = getattr(chat, 'username', None)
-
-            is_match = False
-            if listen_chat == event_id:
-                is_match = True
-            elif event_username and str(event_username).lower() in str(task.target_link).lower():
-                is_match = True
-
-            if not is_match:
-                return
-
-            # Verify task is still active
-            active_task = await ReactionTask.get(task_id_str)
-            if not active_task or not active_task.is_active or active_task.status == "cancelled":
-                # Self-clean the handler
+            # ── FIX: Remove stale handler from previous run/update ────────────────
+            if task_id_str in _reaction_handlers:
                 try:
-                    client.remove_event_handler(handler)
-                    _reaction_handlers.pop(task_id_str, None)
-                except Exception:
-                    pass
-                return
-
-            msg_id = event.message.id
-            logger.info(f"New post detected in {task.target_link} (ID: {msg_id}). Triggering boost...")
-            
-            # Record that we are reacting to this message
-            active_task.reacted_messages.append(msg_id)
-            await active_task.save()
-
-            # Trigger reactions from ALL accounts in background to not block the listener
-            asyncio.create_task(react_to_message_with_all_nodes(task_id_str, msg_id))
-
-        # ── FIX: Store handler ref so future updates can remove it ─────────
-        _reaction_handlers[task_id_str] = handler
-
-        logger.info(f"Started monitoring {task.target_link} for task {task.id}")
-        
-        # Keep alive while active (Optimized Polling)
-        wait_cycles = 0
-        user_active = True
-        while True:
-            await asyncio.sleep(20) # Check every 20s
-            
-            # Real-time User status check (Cached & fast)
-            from app.client_cache import is_user_active
-            user_active = await is_user_active(task.user_id)
-            
-            active_task = await ReactionTask.get(task_id_str)
-            if not active_task or not active_task.is_active or active_task.status == "cancelled" or not user_active:
-                try:
-                    client.remove_event_handler(handler)
-                    _reaction_handlers.pop(task_id_str, None)
+                    client.remove_event_handler(_reaction_handlers[task_id_str])
                 except Exception: pass
-                break
+                del _reaction_handlers[task_id_str]
 
-    except Exception as e:
-        logger.error(f"Monitor failed for task {task.id}: {e}")
-        task.status = "failed"
-        await task.save()
-        # Clean any registered handler on failure
-        _reaction_handlers.pop(task_id_str, None)
+            actual_target = current_task.target_link
+            if "://" in actual_target:
+                actual_target = actual_target.split("://")[-1]
+
+            listen_chat = actual_target
+            if "t.me/" in actual_target and not "joinchat" in actual_target and not "+" in actual_target:
+                parts = actual_target.split("/")
+                if len(parts) >= 3 and parts[-1].isdigit():
+                    listen_chat = parts[-2]
+                else:
+                    listen_chat = parts[-1]
+            
+            if "joinchat" in actual_target or "+" in actual_target:
+                try: await ensure_joined_robust(client, current_task.target_link)
+                except: pass
+                
+            try:
+                # Resolve the accurate entity ID for Telethon 'chats' filter
+                entity = await client.get_entity(current_task.target_link if ("joinchat" in actual_target or "+" in actual_target) else listen_chat)
+                listen_chat = entity.id
+            except Exception as e:
+                logger.warning(f"Could not preemptively resolve entity for {current_task.target_link}: {e}")
+
+            @client.on(events.NewMessage())
+            async def handler(event):
+                from app.client_cache import is_user_active
+                if not await is_user_active(current_task.user_id): return
+
+                chat = await event.get_chat()
+                if not chat: return
+                event_id = getattr(chat, 'id', None)
+                event_username = getattr(chat, 'username', None)
+
+                is_match = False
+                if listen_chat == event_id: is_match = True
+                elif event_username and str(event_username).lower() in str(current_task.target_link).lower(): is_match = True
+
+                if not is_match: return
+
+                active_task = await ReactionTask.get(task_id_str)
+                if not active_task or not active_task.is_active or active_task.status == "cancelled":
+                    try:
+                        client.remove_event_handler(handler)
+                        _reaction_handlers.pop(task_id_str, None)
+                    except Exception: pass
+                    return
+
+                msg_id = event.message.id
+                logger.info(f"New post detected in {current_task.target_link} (ID: {msg_id}). Triggering boost...")
+                active_task.reacted_messages.append(msg_id)
+                await active_task.save()
+                asyncio.create_task(react_to_message_with_all_nodes(task_id_str, msg_id))
+
+            _reaction_handlers[task_id_str] = handler
+            logger.info(f"Started monitoring {current_task.target_link} for task {current_task.id} using {listener_acc.phone_number}")
+            
+            # Keep alive loop
+            while True:
+                await asyncio.sleep(20)
+                from app.client_cache import is_user_active
+                user_active = await is_user_active(current_task.user_id)
+                
+                active_task = await ReactionTask.get(task_id_str)
+                if not active_task or not active_task.is_active or active_task.status == "cancelled" or not user_active:
+                    try:
+                        client.remove_event_handler(handler)
+                        _reaction_handlers.pop(task_id_str, None)
+                    except Exception: pass
+                    return # Exit failover loop, task is done/cancelled
+                
+                # Check if listener client is still connected/authorized
+                if not client.is_connected() or not await client.is_user_authorized():
+                    logger.warning(f"[reaction] Listener {listener_id} disconnected or banned. Starting failover...")
+                    try:
+                        client.remove_event_handler(handler)
+                        _reaction_handlers.pop(task_id_str, None)
+                    except Exception: pass
+                    
+                    # Remove this dead listener from the task
+                    active_task.account_ids.remove(listener_id)
+                    await active_task.save()
+                    break # Break internal loop to restart with NEXT account in outer while loop
+            
+        except Exception as e:
+            logger.error(f"Monitor failover step failed for {listener_id}: {e}")
+            # If it's a permanent failure, remove it and try next
+            error_str = str(e)
+            if any(err in error_str for err in ["AuthKeyUnregistered", "UserDeactivated", "Unauthorized", "Session revoked"]):
+                current_task.account_ids.remove(listener_id)
+                await current_task.save()
+            else:
+                # Temporary error? Wait and retry with same listener
+                await asyncio.sleep(30)
+            
+            _reaction_handlers.pop(task_id_str, None)
+            # Loop continues to next iteration
 
 async def react_to_message_with_all_nodes(task_id: str, message_id: int):
     task = await ReactionTask.get(task_id)
     if not task: return
 
-    for account_id in task.account_ids:
-        # Apply the user's delay BEFORE sending the reaction
-        delay = random.randint(task.min_delay, task.max_delay)
-        logger.info(f"Task {task_id}: Waiting {delay}s before next reaction...")
-        await asyncio.sleep(delay)
+    # Semaphore for concurrent reactions
+    semaphore = asyncio.Semaphore(10)
 
-        # ── FIX: Re-fetch task to get latest config (emojis, target_link, is_active)
-        # Previously used stale snapshot from function entry, so updates mid-loop
-        # would still use old emojis / target_link.
-        current = await ReactionTask.get(task_id)
-        if not current or not current.is_active: break
+    async def single_monitor_node(account_id):
+        async with semaphore:
+            # Individual random delay (Staggered parallel start)
+            delay = random.randint(task.min_delay, task.max_delay)
+            await asyncio.sleep(delay)
 
-        await send_single_reaction(account_id, current.target_link, message_id, current.emojis)
+            # Re-fetch task to check if still active
+            current = await ReactionTask.get(task_id)
+            if not current or not current.is_active: return
 
-async def send_single_reaction(account_id: str, target: str, message_id: int, emojis: list) -> bool:
+            success, is_dead = await send_single_reaction(account_id, current.target_link, message_id, current.emojis, current.with_views)
+            
+            if not success and is_dead:
+                logger.warning(f"[reaction] Monitoring: Removing dead account {account_id} from task {task_id}")
+                # Re-fetch one more time to avoid race conditions with other updates
+                final = await ReactionTask.get(task_id)
+                if final and account_id in final.account_ids:
+                    final.account_ids.remove(account_id)
+                    await final.save()
+
+    # Launch all nodes in parallel (staggered)
+    await asyncio.gather(*(single_monitor_node(aid) for aid in task.account_ids))
+
+async def send_single_reaction(account_id: str, target: str, message_id: int, emojis: list, with_views: bool = False) -> tuple[bool, bool]:
+    """
+    Returns (success, is_dead)
+    """
     account = await TelegramAccount.get(account_id)
-    if not account: return False
+    if not account: return False, True
+
+    from app.services.terminal_service import terminal_manager
 
     try:
         client = await get_client(
@@ -272,23 +325,82 @@ async def send_single_reaction(account_id: str, target: str, message_id: int, em
                 logger.error(f"Failed to fetch latest message from {actual_target}: {e}")
                 return False
 
-        # Pick random emoji from selection
-        emoji = random.choice(emojis)
-        logger.info(f"Account {account.phone_number} attempting to react {emoji} to {actual_target} msg {actual_msg_id}")
+        # Pick random emoji from selection with retry logic
+        tried_emojis = set()
+        current_emoji = random.choice(emojis)
+        success = False
+        
+        # Max retries: try up to 3 different emojis from user list, then fallback
+        max_retries = min(3, len(emojis))
+        
+        for attempt in range(max_retries + 1):
+            try:
+                # If we exhausted user list or on final attempt, use safe fallback
+                if attempt == max_retries:
+                    current_emoji = "👍"
+                
+                logger.info(f"Account {account.phone_number} attempt {attempt+1}: reacting {current_emoji} to {actual_target} msg {actual_msg_id}")
+                
+                await client(SendReactionRequest(
+                    peer=peer_entity,
+                    msg_id=actual_msg_id,
+                    reaction=[ReactionEmoji(emoticon=current_emoji)]
+                ))
+                
+                # ── Optional View Increment ──
+                if with_views:
+                    try:
+                        # Simulate actual reading for higher success rate
+                        await client.get_messages(peer_entity, ids=[actual_msg_id])
+                        
+                        await client(GetMessagesViewsRequest(
+                            peer=peer_entity,
+                            id=[actual_msg_id],
+                            increment=True
+                        ))
+                        # Log the view boost specifically
+                        await terminal_manager.log_event(account.user_id, f"👁️ VIEW BOOSTED: {account.phone_number} -> {actual_target}", str(account.id), "reaction", "INFO")
+                    except Exception as ve:
+                        logger.warning(f"View increment failed for {account.phone_number}: {ve}")
+                
+                # Success!
+                emoji = current_emoji
+                success = True
+                break
+                
+            except Exception as e:
+                error_str = str(e)
+                is_permanent = any(err in error_str for err in ["AuthKeyUnregistered", "UserDeactivated", "Unauthorized", "Session revoked"])
+                
+                if "Invalid reaction provided" in error_str or "REACTION_INVALID" in error_str:
+                    logger.warning(f"Reaction {current_emoji} rejected by {actual_target}. Attempting alternative...")
+                    tried_emojis.add(current_emoji)
+                    
+                    # Pick a new one from user list that we haven't tried
+                    remaining = [em for em in emojis if em not in tried_emojis]
+                    if remaining and attempt < max_retries - 1:
+                        current_emoji = random.choice(remaining)
+                    else:
+                        # No more user emojis to try, next loop will hit the 👍 fallback
+                        pass
+                    continue
+                else:
+                    # Non-reaction-specific error (e.g. connection, auth), don't retry emoji
+                    logger.error(f"Single reaction failed with critical error: {e} (Dead={is_permanent})")
+                    return False, is_permanent
 
-        await client(SendReactionRequest(
-            peer=peer_entity,
-            msg_id=actual_msg_id,
-            reaction=[ReactionEmoji(emoticon=emoji)]
-        ))
-        from app.services.terminal_service import terminal_manager
+        if not success:
+            return False, False
+
         await terminal_manager.log_event(account.user_id, f"⚡ REACTED {emoji}: {account.phone_number} -> {actual_target}", str(account.id), "reaction", "SUCCESS")
         
-        logger.info(f"Account {account.phone_number} successfully reacted to {actual_target} msg {actual_msg_id}")
-        return True
+        logger.info(f"Account {account.phone_number} successfully reacted to {actual_target} msg {actual_msg_id} with {emoji}")
+        return True, False
     except Exception as e:
-        logger.error(f"Single reaction failed for account {account_id} on {target}: {e}")
-        return False
+        error_str = str(e)
+        is_dead = any(err in error_str for err in ["AuthKeyUnregistered", "UserDeactivated", "Unauthorized", "Session revoked"])
+        logger.error(f"Single reaction failed for account {account_id} on {target}: {e} (Dead={is_dead})")
+        return False, is_dead
 
 
 async def ensure_joined_robust(client, target_link: str):
@@ -326,6 +438,12 @@ async def ensure_joined_robust(client, target_link: str):
             except Exception:
                 # Could not resolve or not in, proceed to join attempt
                 pass
+
+        # 0. Handle /c/ links (Private Channel Links)
+        if "/c/" in link:
+            # We can't join via /c/ link, it needs to be a joinchat link
+            # but if they are using it, they might already be in.
+            return True
 
         # 1. Handle Private Invite Links
         if is_private:
@@ -395,6 +513,14 @@ async def bulk_join_all_nodes(task: ReactionTask):
                 logger.error(f"Node join failed for {acc_id}: {e}")
 
     # Launch all joins concurrently but throttled by semaphore
-    await asyncio.gather(*(single_node_join(aid) for aid in task.account_ids))
+    try:
+        await asyncio.wait_for(
+            asyncio.gather(*(single_node_join(aid) for aid in task.account_ids)),
+            timeout=180 # 3 minute max for bulk join
+        )
+    except asyncio.TimeoutError:
+        logger.warning(f"Bulk join for task {task.id} timed out partially. Proceeding anyway.")
+    except Exception as e:
+        logger.error(f"Bulk join error: {e}")
     
     await terminal_manager.log_event(task.user_id, f"✅ CLUSTER READY: All available accounts joined/verified {task.target_link}.", "SYSTEM", "reaction", "SUCCESS")

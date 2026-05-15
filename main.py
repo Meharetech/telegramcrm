@@ -13,7 +13,7 @@ from app.models import (
     Proxy, SystemLog, ReactionTask, MemberAddSettings, MemberAddJob,
     MemberAddSchedule, Plan, Payment, SystemSettings, BotForwarder,
     WalletTransaction, ShopPurchase, AiAgent, AiKnowledgeSummary,
-    AiReplyLog, AiSettings
+    AiReplyLog, AiSettings, AccountAgingTask
 )
 from app.models.auto_reply import AutoReplyRule, AutoReplySettings
 from app.models.folder_campaign import FolderCampaignJob
@@ -32,6 +32,7 @@ from app.api.shop import router as shop_router
 from app.api.accounts.otp_viewer import router as otp_viewer_router
 from app.api.folder_campaign import router as folder_campaign_router
 from app.api.ai_agent import router as ai_agent_router
+from app.api.account_aging import router as account_aging_router
 from contextlib import asynccontextmanager
 from app.client_cache import shutdown_all, start_maintenance
 from app.config import settings
@@ -185,6 +186,22 @@ async def resume_background_services():
                 FOLDER_CAMPAIGN_TASKS[job.user_id] = {}
             FOLDER_CAMPAIGN_TASKS[job.user_id][job.account_id] = task
             asyncio.create_task(task.run())
+
+    # 6. Resume Reaction Monitoring Tasks
+    from app.services.reaction.logic import execute_reaction_boost
+    active_reaction_tasks = await ReactionTask.find(ReactionTask.status == "monitoring").to_list()
+    for rtask in active_reaction_tasks:
+        if await is_user_active(rtask.user_id):
+            logger.info(f"[startup] Resuming Reaction Monitor for user {rtask.user_id} on {rtask.target_link}")
+            asyncio.create_task(execute_reaction_boost(str(rtask.id), skip_join=True))
+    
+    # 7. Resume Account Aging
+    from app.services.account_aging import start_aging
+    active_aging_tasks = await AccountAgingTask.find(AccountAgingTask.is_active == True).to_list()
+    for atask in active_aging_tasks:
+        if await is_user_active(atask.user_id):
+            logger.info(f"[startup] Resuming Account Aging for user {atask.user_id}")
+            asyncio.create_task(start_aging(atask.user_id))
     
     all_resumes = auto_tasks + fwd_tasks
     if all_resumes:
@@ -235,7 +252,7 @@ async def lifespan(app: FastAPI):
                 ForwarderRule, TelegramAPI, ReactionTask, Reminder, Proxy, SystemLog,
                 MemberAddSettings, MemberAddJob, MemberAddSchedule, MessageCampaignJob, MessageCampaignSchedule, Plan, Payment,
                 SystemSettings, BotForwarder, WalletTransaction, ShopPurchase, FolderCampaignJob, GroupJoinJob,
-                AiAgent, AiKnowledgeSummary, AiReplyLog, AiSettings
+                AiAgent, AiKnowledgeSummary, AiReplyLog, AiSettings, AccountAgingTask
             ]
         )
 
@@ -265,17 +282,11 @@ async def lifespan(app: FastAPI):
             logger.info("[startup] Message Campaign Scheduler started")
         except Exception as e:
             logger.error(f"[startup] Message Campaign Scheduler failed: {e}")
-        # ── Migration & Resilience (COLD START MODE) ──────────────────────────
+        # ── Migration & Resilience (SERVICE RESUMPTION MODE) ──────────────────
         try:
-            # 1. Global Reset: Set all users to 'STOPPED' on server boot for security.
-            # This prevents "Ghost Sessions" and "Two IP Address" login storms.
-            await User.find_all().update({"$set": {"services_active": False}})
-            
-            # 2. DISABLED: resume_background_services()
-            # Everything will now remain OFF until the user manually launches the Terminal.
-            # create_task(resume_background_services())
-            
-            logger.info("[startup] COLD START: All user services RESET and locked to STOPPED state.")
+            # Re-enabled: This ensures monitors and campaigns resume after a restart.
+            create_task(resume_background_services())
+            logger.info("[startup] SERVICE RESUMPTION: Background workers triggered.")
         except Exception as e:
             logger.error(f"[startup] Startup migration failure: {e}")
 
@@ -337,6 +348,7 @@ app.include_router(otp_viewer_router, prefix="/api/otp", tags=["OTP Viewer"])
 app.include_router(folder_campaign_router, prefix="/api/folder-campaign", tags=["Folder Campaign"])
 app.include_router(group_join_router, prefix="/api/group-join", tags=["Group Joiner"])
 app.include_router(ai_agent_router, prefix="/api/ai-agent", tags=["AI Agent"])
+app.include_router(account_aging_router, prefix="/api/account-aging", tags=["Account Aging"])
 app.include_router(ws_router,         prefix="/api",             tags=["WebSockets"])
 
 @app.get("/")

@@ -121,6 +121,19 @@ async def start_bot(bot: BotForwarder):
         _attach_bot_handlers(client, bot)
         
         await terminal_manager.log_event(str(bot.user_id), f"🤖 Bot Hub agent {bot.name} is now ONLINE.", bot_id, "bot_hub", "SUCCESS")
+        
+        # ── Startup Notification to Admins ──
+        try:
+            startup_msg = f"🚀 **Bot Forwarder '{bot.name}' is now ONLINE** and ready to forward messages."
+            for admin in bot.admin_usernames:
+                try:
+                    await client.send_message(admin.strip(), startup_msg)
+                except Exception:
+                    # Ignore if admin username is unreachable at start
+                    pass
+        except Exception as startup_err:
+            logger.warning(f"Failed to send startup notification for {bot.name}: {startup_err}")
+
         logger.info(f"[bot-service] Bot {bot.name} (ID: {bot_id}) is ONLINE.")
         
     except FloodWaitError as e:
@@ -174,13 +187,28 @@ def _attach_bot_handlers(client: TelegramClient, bot: BotForwarder):
             logger.info(f"[bot-service] Message received by bot {rule.name} from ID: {sender_id} (@{sender_username})")
 
             auth_list = [u.lstrip('@').lower().strip() for u in rule.admin_usernames]
-            
-            is_auth = False
-            if sender_username and sender_username.lower() in auth_list:
-                is_auth = True
+            is_auth = (sender_username and sender_username.lower() in auth_list)
             
             if not is_auth:
                 logger.debug(f"[bot-service] Unauthorized sender {sender_username} for bot {rule.name}")
+                return
+
+            # ── COMMAND HANDLER: /start ───────────────────────────────────────
+            if event.message.text and event.message.text.startswith('/start'):
+                admin_text = "\n".join([f"👤 @{u}" for u in rule.admin_usernames])
+                target_text = "\n".join([f"📢 {t}" for t in rule.target_chat_ids]) or "No specific targets (Auto-Forward Mode)"
+                
+                response = (
+                    "🚀 **Bot Forwarding System Active**\n\n"
+                    f"🛡️ **Authorized Admins:**\n{admin_text}\n\n"
+                    f"🎯 **Target Channels/Groups:**\n{target_text}\n\n"
+                    "✅ Send any message here, and I will forward it to the targets."
+                )
+                await event.reply(response)
+                return
+
+            # Prevent forwarding of other commands
+            if event.message.text and event.message.text.startswith('/'):
                 return
 
             # 4. Filters
@@ -198,6 +226,7 @@ def _attach_bot_handlers(client: TelegramClient, bot: BotForwarder):
                     if dialog.is_group or dialog.is_channel:
                         targets.append(str(dialog.id))
 
+            success_count = 0
             for target in targets:
                 try:
                     t = target.strip()
@@ -209,14 +238,26 @@ def _attach_bot_handlers(client: TelegramClient, bot: BotForwarder):
                     except Exception:
                         entity = t
 
+                    from app.services.terminal_service import terminal_manager
                     if rule.forward_mode == "forward":
                         await client.forward_messages(entity, event.message)
                     else:
                         await client.send_message(entity, event.message)
                     
+                    success_count += 1
+                    msg_snippet = (event.message.text[:30] + "...") if event.message.text and len(event.message.text) > 30 else (event.message.text or "Media/Attachment")
+                    await terminal_manager.log_event(rule.user_id, f"📤 Bot {rule.name} forwarded: '{msg_snippet}' to {target}", bot_id, "bot_hub", "SUCCESS")
                     logger.info(f"[bot-service] Bot {rule.name} forwarded message successfully to {target}")
                 except Exception as e:
+                    from app.services.terminal_service import terminal_manager
+                    await terminal_manager.log_event(rule.user_id, f"❌ Bot {rule.name} failed to forward to {target}: {str(e)}", bot_id, "bot_hub", "ERROR")
                     logger.error(f"[bot-service] Bot {rule.name} failed to forward to {target}: {e}")
+
+            # ── Success Confirmation Reply ──
+            if success_count > 0:
+                await event.reply(f"✅ Successfully forwarded to {success_count} target(s).")
+            elif targets:
+                await event.reply("⚠️ Failed to forward to any targets. Check the terminal for errors.")
 
         except Exception as outer_e:
             logger.error(f"[bot-service] Error in bot message handler: {outer_e}")

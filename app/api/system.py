@@ -154,7 +154,7 @@ async def start_all_services(options: StartOptions, current_user: User = Depends
         for t in tasks:
             t.status = "monitoring"
             await t.save()
-            asyncio.create_task(execute_reaction_boost(str(t.id)))
+            asyncio.create_task(execute_reaction_boost(str(t.id), skip_join=True))
             await terminal_manager.log_event(user_id, f"🚀 Reaction Booster resumed: {t.target_link}", str(t.id), "reaction", "SUCCESS")
 
     # 4. Start Bot Hub Agents
