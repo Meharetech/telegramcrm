@@ -16,6 +16,9 @@ class UpdateAgingRequest(BaseModel):
 
 @router.get("/")
 async def get_aging_status(current_user: User = Depends(get_current_user)):
+    from app.api.auth_utils import check_plan_limit
+    await check_plan_limit(current_user, "access_account_aging")
+    
     task = await AccountAgingTask.find_one(AccountAgingTask.user_id == str(current_user.id))
     if not task:
         task = AccountAgingTask(user_id=str(current_user.id))
@@ -25,6 +28,9 @@ async def get_aging_status(current_user: User = Depends(get_current_user)):
 
 @router.post("/update")
 async def update_aging_config(req: UpdateAgingRequest, current_user: User = Depends(get_current_user)):
+    from app.api.auth_utils import check_plan_limit
+    await check_plan_limit(current_user, "access_account_aging")
+    
     task = await AccountAgingTask.find_one(AccountAgingTask.user_id == str(current_user.id))
     if not task:
         task = AccountAgingTask(user_id=str(current_user.id))
@@ -41,10 +47,16 @@ async def update_aging_config(req: UpdateAgingRequest, current_user: User = Depe
 
 @router.post("/start")
 async def start_aging_api(current_user: User = Depends(get_current_user)):
+    from app.api.auth_utils import check_plan_limit
+    await check_plan_limit(current_user, "access_account_aging")
+    
     await start_aging(str(current_user.id))
     return {"status": "success", "message": "Aging service started."}
 
 @router.post("/stop")
 async def stop_aging_api(current_user: User = Depends(get_current_user)):
+    from app.api.auth_utils import check_plan_limit
+    await check_plan_limit(current_user, "access_account_aging")
+    
     await stop_aging(str(current_user.id))
     return {"status": "success", "message": "Aging service stopped."}

@@ -56,6 +56,7 @@ class SystemSettings(Document):
     demo_access_creative_tools: bool = False
     demo_access_ban_checker: bool = False
     demo_access_ai_agent: bool = False
+    demo_access_account_aging: bool = False
     
     # Demo Quantity Limits
     demo_max_auto_replies: int = 1
@@ -68,6 +69,11 @@ class SystemSettings(Document):
     # Demo Default Resources
     demo_raw_proxies: Optional[str] = None
     demo_raw_apis: Optional[str] = None
+
+    # Admin Agent Permissions
+    agent_can_manage_plans: bool = True
+    agent_can_manage_demo_settings: bool = True
+    agent_can_manage_aging: bool = True
 
     class Settings:
         name = "system_settings"

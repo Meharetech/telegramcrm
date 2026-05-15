@@ -45,6 +45,7 @@ class Plan(Document):
     access_folder_scraper: bool = False    # Folder Peer Scraper
     access_group_joiner: bool = False     # Group joiner tool
     access_ai_agent: bool = False         # AI Chatbot Agent Access
+    access_account_aging: bool = False    # Account Aging Access
 
     class Settings:
         name = "plans"

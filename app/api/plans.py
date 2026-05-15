@@ -11,7 +11,7 @@ from typing import Optional
 from bson import ObjectId
 
 from app.models import User, Plan, Payment, SystemSettings, WalletTransaction
-from app.api.auth_utils import get_current_user
+from app.api.auth_utils import get_current_user, check_admin_permission
 from app.config import settings
 from app.services.email_service import send_payment_notification_to_admin
 
@@ -86,6 +86,7 @@ class PlanCreate(BaseModel):
     access_folder_scraper: bool = False
     access_group_joiner: bool = False
     access_ai_agent: bool = False
+    access_account_aging: bool = False
     max_bots: int = 1
     max_folder_accounts: int = 1
     ai_chatbot_limit: int = -1
@@ -120,6 +121,7 @@ class PlanUpdate(BaseModel):
     access_folder_scraper: Optional[bool] = None
     access_group_joiner: Optional[bool] = None
     access_ai_agent: Optional[bool] = None
+    access_account_aging: Optional[bool] = None
     max_bots: Optional[int] = None
     max_folder_accounts: Optional[int] = None
     ai_chatbot_limit: Optional[int] = None
@@ -188,6 +190,7 @@ class SystemSettingsSchema(BaseModel):
     demo_access_creative_tools: bool = False
     demo_access_ban_checker: bool = False
     demo_access_ai_agent: bool = False
+    demo_access_account_aging: bool = False
     demo_max_auto_replies: int = 1
     demo_max_reaction_channels: int = 1
     demo_max_forwarder_channels: int = 1
@@ -196,6 +199,9 @@ class SystemSettingsSchema(BaseModel):
     demo_max_ai_agents: int = 1
     demo_raw_proxies: Optional[str] = None
     demo_raw_apis: Optional[str] = None
+    agent_can_manage_plans: bool = True
+    agent_can_manage_demo_settings: bool = True
+    agent_can_manage_aging: bool = True
 
 class InitiateManualPaymentReq(BaseModel):
     plan_id: str
@@ -250,6 +256,7 @@ def plan_to_dict(p: Plan) -> dict:
         "access_folder_scraper": getattr(p, "access_folder_scraper", False),
         "access_group_joiner": getattr(p, "access_group_joiner", False),
         "access_ai_agent": getattr(p, "access_ai_agent", False),
+        "access_account_aging": getattr(p, "access_account_aging", False),
         "max_bots": getattr(p, "max_bots", 1),
         "max_folder_accounts": getattr(p, "max_folder_accounts", 1),
         "ai_chatbot_limit": getattr(p, "ai_chatbot_limit", -1),
@@ -285,6 +292,7 @@ async def get_demo_plan_data() -> dict:
         "access_creative_tools": getattr(settings_db, "demo_access_creative_tools", False),
         "access_ban_checker": getattr(settings_db, "demo_access_ban_checker", False),
         "access_ai_agent": getattr(settings_db, "demo_access_ai_agent", False),
+        "access_account_aging": getattr(settings_db, "demo_access_account_aging", False),
         "can_auto_reply": getattr(settings_db, "demo_can_auto_reply", False),
         "can_forward": getattr(settings_db, "demo_can_forward", False),
         "can_react": getattr(settings_db, "demo_can_react", False),
@@ -306,16 +314,14 @@ async def get_demo_plan_data() -> dict:
 
 @router.get("/admin")
 async def list_plans(current_user: User = Depends(get_current_user)):
-    if not current_user.is_admin:
-        raise HTTPException(status_code=403, detail="Forbidden")
+    await check_admin_permission(current_user, "agent_can_manage_plans")
     plans = await Plan.find_all().to_list()
     return [plan_to_dict(p) for p in plans]
 
 
 @router.post("/admin")
 async def create_plan(req: PlanCreate, current_user: User = Depends(get_current_user)):
-    if not current_user.is_admin:
-        raise HTTPException(status_code=403, detail="Forbidden")
+    await check_admin_permission(current_user, "agent_can_manage_plans")
     plan = Plan(**req.model_dump())
     await plan.insert()
     return plan_to_dict(plan)
@@ -325,8 +331,7 @@ async def create_plan(req: PlanCreate, current_user: User = Depends(get_current_
 
 @router.get("/admin/gateway-settings")
 async def get_gateway_settings(current_user: User = Depends(get_current_user)):
-    if not current_user.is_admin:
-        raise HTTPException(status_code=403, detail="Forbidden")
+    await check_admin_permission(current_user, "agent_can_manage_demo_settings")
     
     settings_db = await SystemSettings.find_one()
     if not settings_db:
@@ -338,8 +343,7 @@ async def get_gateway_settings(current_user: User = Depends(get_current_user)):
 
 @router.put("/admin/gateway-settings")
 async def update_gateway_settings(req: SystemSettingsSchema, current_user: User = Depends(get_current_user)):
-    if not current_user.is_admin:
-        raise HTTPException(status_code=403, detail="Forbidden")
+    await check_admin_permission(current_user, "agent_can_manage_demo_settings")
     
     settings_db = await SystemSettings.find_one()
     if not settings_db:
@@ -419,8 +423,7 @@ async def get_all_subscriptions_and_payments(current_user: User = Depends(get_cu
 
 @router.put("/admin/{plan_id}")
 async def update_plan(plan_id: str, req: PlanUpdate, current_user: User = Depends(get_current_user)):
-    if not current_user.is_admin:
-        raise HTTPException(status_code=403, detail="Forbidden")
+    await check_admin_permission(current_user, "agent_can_manage_plans")
     plan = await Plan.get(ObjectId(plan_id))
     if not plan:
         raise HTTPException(status_code=404, detail="Plan not found")
@@ -441,8 +444,7 @@ async def update_plan(plan_id: str, req: PlanUpdate, current_user: User = Depend
 
 @router.delete("/admin/{plan_id}")
 async def delete_plan(plan_id: str, current_user: User = Depends(get_current_user)):
-    if not current_user.is_admin:
-        raise HTTPException(status_code=403, detail="Forbidden")
+    await check_admin_permission(current_user, "agent_can_manage_plans")
     plan = await Plan.get(ObjectId(plan_id))
     if not plan:
         raise HTTPException(status_code=404, detail="Plan not found")
@@ -500,8 +502,7 @@ async def verify_payment_admin(payment_id: str, req: AdminVerifyPaymentReq, curr
 
 @router.post("/admin/assign-user/{user_id}")
 async def assign_plan_to_user(user_id: str, req: AssignPlan, current_user: User = Depends(get_current_user)):
-    if not current_user.is_admin:
-        raise HTTPException(status_code=403, detail="Forbidden")
+    await check_admin_permission(current_user, "agent_can_manage_plans")
     user = await User.get(ObjectId(user_id))
     if not user:
         raise HTTPException(status_code=404, detail="User not found")

@@ -112,6 +112,7 @@ async def check_plan_limit(user: User, field: str, current_count: Optional[int] 
         "access_reminders": True,
         "access_bot_hub": True,
         "access_ai_agent": False,
+        "access_account_aging": False,
         "ai_chatbot_limit": settings.demo_ai_chatbot_limit,
         "max_ai_agents": settings.demo_max_ai_agents
     }
@@ -165,6 +166,7 @@ async def check_plan_limit(user: User, field: str, current_count: Optional[int] 
         demo_limits["can_forward"] = getattr(sys_settings, "demo_can_forward", False)
         demo_limits["can_react"] = getattr(sys_settings, "demo_can_react", False)
         demo_limits["access_ai_agent"] = getattr(sys_settings, "demo_access_ai_agent", False)
+        demo_limits["access_account_aging"] = getattr(sys_settings, "demo_access_account_aging", False)
         demo_limits["ai_chatbot_limit"] = getattr(sys_settings, "demo_ai_chatbot_limit", 200)
         demo_limits["max_ai_agents"] = getattr(sys_settings, "demo_max_ai_agents", 1)
     else:
@@ -188,6 +190,7 @@ async def check_plan_limit(user: User, field: str, current_count: Optional[int] 
         demo_limits["can_forward"] = True
         demo_limits["can_react"] = True
         demo_limits["access_ai_agent"] = True
+        demo_limits["access_account_aging"] = True
         demo_limits["ai_chatbot_limit"] = 200
         demo_limits["max_ai_agents"] = 1
 
@@ -279,7 +282,8 @@ async def check_plan_limit(user: User, field: str, current_count: Optional[int] 
         "max_bots": "bot_hub",
         "access_group_joiner": "group_joiner",
         "max_ai_agents": "ai_agent",
-        "access_ai_agent": "ai_agent"
+        "access_ai_agent": "ai_agent",
+        "access_account_aging": "aging"
     }
     
     svc_id = service_map.get(field)
@@ -310,5 +314,28 @@ async def check_plan_limit(user: User, field: str, current_count: Optional[int] 
     
     if current_count >= val:
         raise HTTPException(status_code=403, detail=f"Plan limit reached: {val} {field}. Upgrade your plan for more.")
+    
+    return True
+
+async def check_admin_permission(user: User, permission_field: str):
+    """
+    Validates if an admin user has specific permission to access an admin module.
+    Super Admins bypass all checks.
+    """
+    if not user.is_admin:
+        raise HTTPException(status_code=403, detail="Forbidden: Admin access required.")
+    
+    if user.is_super_admin:
+        return True
+        
+    from app.models import SystemSettings
+    settings = await SystemSettings.find_one()
+    if not settings:
+        settings = SystemSettings()
+        
+    allowed = getattr(settings, permission_field, True)
+    if not allowed:
+        module_name = permission_field.replace("agent_can_manage_", "").replace("_", " ").title()
+        raise HTTPException(status_code=403, detail=f"Access Denied: You do not have permission to manage {module_name}.")
     
     return True
