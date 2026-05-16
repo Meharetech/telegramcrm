@@ -40,8 +40,8 @@ async def start_group_join(
     if not links:
         raise HTTPException(status_code=400, detail="No group links provided. Upload a file or enter manually.")
 
-    if len(links) > 50:
-        raise HTTPException(status_code=400, detail="Maximum 50 links allowed per operation for safety.")
+    if len(links) > 30:
+        raise HTTPException(status_code=400, detail="Maximum 30 links allowed per operation for safety.")
 
 
     if user_id not in GROUP_JOIN_TASKS:

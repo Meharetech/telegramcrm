@@ -40,6 +40,16 @@ import logging
 import gc
 import os
 
+# ── CONFIGURE GLOBAL LOGGING ──────────────────────────────────────────────
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
+    handlers=[
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
+
 # ── HIGH PERFORMANCE EVENT LOOP (uvloop) ──────────────────────────────────
 if os.name != 'nt': # Only on Linux/Ubuntu
     try:
@@ -64,8 +74,6 @@ else:
 
     proactor_events._ProactorBasePipeTransport._call_connection_lost = _patched_call_connection_lost
     logging.getLogger(__name__).info("[patch] Applied Windows asyncio/proactor log fix.")
-
-logger = logging.getLogger(__name__)
 
 async def run_system_maintenance():
     """
@@ -255,6 +263,15 @@ async def lifespan(app: FastAPI):
                 AiAgent, AiKnowledgeSummary, AiReplyLog, AiSettings, AccountAgingTask
             ]
         )
+
+        # ── GLOBAL SYSTEM RESET ON STARTUP ──
+        # This ensures that after a server restart, all services remain OFF 
+        # until the user manually clicks "Start" in the terminal again.
+        try:
+            await User.find_all().update({"$set": {"services_active": False}})
+            logger.info("[startup] GLOBAL RESET: All user system statuses set to OFF.")
+        except Exception as e:
+            logger.error(f"[startup] System reset failed: {e}")
 
         # ── Start Background Tasks (System Health) ───────────────────────────
         create_task(run_system_maintenance())

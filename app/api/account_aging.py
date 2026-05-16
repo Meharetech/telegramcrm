@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from app.models import User, AccountAgingTask, TelegramAccount
 from app.api.auth_utils import get_current_user
-from app.services.account_aging import start_aging, stop_aging
+from app.services.account_aging import start_aging, stop_aging, mark_all_accounts_read
 from pydantic import BaseModel
 from typing import List
 
@@ -60,3 +60,13 @@ async def stop_aging_api(current_user: User = Depends(get_current_user)):
     
     await stop_aging(str(current_user.id))
     return {"status": "success", "message": "Aging service stopped."}
+
+@router.post("/mark-all-read")
+async def mark_all_read_api(current_user: User = Depends(get_current_user)):
+    from app.api.auth_utils import check_plan_limit
+    await check_plan_limit(current_user, "access_account_aging")
+    
+    # Run in background to avoid timeout
+    import asyncio
+    asyncio.create_task(mark_all_accounts_read(str(current_user.id)))
+    return {"status": "success", "message": "Global cleanup started in background."}

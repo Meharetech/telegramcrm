@@ -13,8 +13,8 @@ async def create_default_plans():
     # 2. DEFINITION DATA
     plans_data = [
         {
-            "name": "7-Day Free Trial",
-            "description": "Full access to all premium features for 7 days. Test everything before you buy.",
+            "name": "3-Day Free Trial",
+            "description": "Full access to all premium features for 3 days. Test everything before you buy.",
             "price_inr": 0.0,
             "max_accounts": 1,
             "max_api_keys": 5,

@@ -87,6 +87,19 @@ async def run_aging_loop(user_id: str):
         busy_accounts = set()
         
         while True:
+            # ── NEW: TERMINAL CONNECTION & SYSTEM STATUS CHECK ──
+            if user_id not in terminal_manager.active_connections:
+                # Loop stays alive but does zero work until terminal is re-opened
+                await asyncio.sleep(10)
+                continue
+            
+            from app.models.user import User
+            user = await User.get(user_id)
+            if not user or not user.services_active:
+                # System is globally STOPPED. Stay dormant.
+                await asyncio.sleep(10)
+                continue
+
             # Refresh task object to get latest settings
             task_obj = await AccountAgingTask.find_one(AccountAgingTask.user_id == user_id)
             if not task_obj or not task_obj.is_active:
@@ -125,6 +138,13 @@ async def run_aging_loop(user_id: str):
                         pair_index += 1
                         continue
                     
+                    # Pre-flight existence check
+                    acc_a = await TelegramAccount.get(id_a)
+                    acc_b = await TelegramAccount.get(id_b)
+                    if not acc_a or not acc_b:
+                        pair_index += 1
+                        continue
+                        
                     # Start session
                     session_task = asyncio.create_task(
                         run_chat_session(user_id, id_a, id_b, busy_accounts)
@@ -163,11 +183,10 @@ async def run_aging_loop(user_id: str):
         logger.error(f"Fatal error in aging loop for {user_id}: {e}")
 
 async def run_chat_session(user_id: str, id_a: str, id_b: str, busy_set: set):
-    """Handles a single back-and-forth session between two accounts."""
-    busy_set.add(id_a)
-    busy_set.add(id_b)
-    
     try:
+        busy_set.add(id_a)
+        busy_set.add(id_b)
+        
         task_obj = await AccountAgingTask.find_one(AccountAgingTask.user_id == user_id)
         if not task_obj: return
 
@@ -197,7 +216,46 @@ async def run_chat_session(user_id: str, id_a: str, id_b: str, busy_set: set):
             
             target_peer = receiver.username if receiver.username else receiver.phone_number
             msg = random.choice(WARMUP_MESSAGES)
-            await client.send_message(target_peer, msg)
+            
+            # Robust Read Acknowledge & Reply ID Discovery
+            reply_to_id = None
+            try:
+                # Fetch a small history to find the latest incoming message
+                history = await client.get_messages(target_peer, limit=5)
+                for m in history:
+                    if not m.out: # This is an incoming message
+                        await client.send_read_acknowledge(target_peer, max_id=m.id)
+                        reply_to_id = m.id
+                        break
+                await asyncio.sleep(random.uniform(1, 2))
+            except Exception as e:
+                err_msg = str(e)
+                # Handle Telethon session corruption/misuse errors properly
+                if any(x in err_msg for x in ["Constructor ID", "TLObject", "misusing the session", "Broken pipe"]):
+                    logger.error(f"🔄 Session corruption detected for {sender.id}: {err_msg}. Attempting fresh reconnection...")
+                    from app.client_cache import invalidate
+                    await invalidate(str(sender.id))
+                    client = await get_client(str(sender.id))
+                    # Optional: One-time retry after reconnection
+                    try:
+                        history = await client.get_messages(target_peer, limit=5)
+                        for m in history:
+                            if not m.out:
+                                await client.send_read_acknowledge(target_peer, max_id=m.id)
+                                reply_to_id = m.id
+                                break
+                    except: pass
+                else:
+                    logger.warning(f"Robust read acknowledge failed: {e}")
+            
+            # Simulate typing behavior for realism
+            try:
+                async with client.action(target_peer, 'typing'):
+                    await asyncio.sleep(random.randint(2, 5))
+            except: 
+                pass
+
+            await client.send_message(target_peer, msg, reply_to=reply_to_id)
             
             # Update stats atomically
             await AccountAgingTask.find_one(AccountAgingTask.user_id == user_id).update({"$inc": {"total_messages_sent": 1}, "$set": {"last_message_at": datetime.now(timezone.utc)}})
@@ -208,6 +266,22 @@ async def run_chat_session(user_id: str, id_a: str, id_b: str, busy_set: set):
             
             await asyncio.sleep(random.randint(4, 8))
 
+        # FINAL SYNC: Mark all messages as seen for both accounts at the end of the session
+        try:
+            from telethon.tl.functions.messages import ReadHistoryRequest
+            c_a = await get_client(id_a)
+            c_b = await get_client(id_b)
+            
+            # Send ending messages and ensure full read acknowledgment
+            if c_a:
+                await c_a.send_message(acc_b.username or acc_b.phone_number, "Conversation ended ✅")
+                await c_a(ReadHistoryRequest(peer=acc_b.username or acc_b.phone_number, max_id=0))
+            if c_b:
+                await c_b.send_message(acc_a.username or acc_a.phone_number, "Conversation ended ✅")
+                await c_b(ReadHistoryRequest(peer=acc_a.username or acc_a.phone_number, max_id=0))
+        except:
+            pass
+
         # Cool-down after session
         await asyncio.sleep(random.randint(task_obj.min_delay, task_obj.max_delay))
 
@@ -216,3 +290,48 @@ async def run_chat_session(user_id: str, id_a: str, id_b: str, busy_set: set):
     finally:
         busy_set.discard(id_a)
         busy_set.discard(id_b)
+
+async def mark_all_accounts_read(user_id: str):
+    """Iterates through all selected accounts and marks all their chats as read."""
+    task_obj = await AccountAgingTask.find_one(AccountAgingTask.user_id == user_id)
+    if not task_obj or not task_obj.selected_account_ids:
+        return
+
+    from telethon.tl.functions.messages import ReadHistoryRequest
+    from app.client_cache import invalidate
+    
+    await terminal_manager.log_event(user_id, f"🧹 Starting global cleanup: Marking all chats as read for {len(task_obj.selected_account_ids)} accounts.", "system", "aging", "INFO")
+    
+    for acc_id in task_obj.selected_account_ids:
+        try:
+            client = await get_client(acc_id)
+            if not client: continue
+            
+            acc = await TelegramAccount.get(acc_id)
+            disp = f"@{acc.username}" if acc.username else acc.phone_number
+            
+            count = 0
+            try:
+                async for dialog in client.iter_dialogs():
+                    if dialog.unread_count > 0:
+                        await client(ReadHistoryRequest(peer=dialog.entity, max_id=0))
+                        count += 1
+            except Exception as e:
+                err_msg = str(e)
+                if any(x in err_msg for x in ["Constructor ID", "TLObject", "misusing the session"]):
+                    logger.warning(f"🔄 Dialog session corruption for {acc_id}: {err_msg}. Reconnecting...")
+                    await invalidate(acc_id)
+                    client = await get_client(acc_id)
+                    # Retry once
+                    async for dialog in client.iter_dialogs():
+                        if dialog.unread_count > 0:
+                            await client(ReadHistoryRequest(peer=dialog.entity, max_id=0))
+                            count += 1
+                else:
+                    raise e
+            
+            await terminal_manager.log_event(user_id, f"✅ Cleaned {count} chats for {disp}.", acc_id, "aging", "SUCCESS")
+        except Exception as e:
+            logger.error(f"Failed to clean account {acc_id}: {e}")
+    
+    await terminal_manager.log_event(user_id, "✨ Global cleanup complete.", "system", "aging", "SUCCESS")

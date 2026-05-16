@@ -602,12 +602,12 @@ async def get_profile(current_user: User = Depends(get_current_user)):
             current_user.trial_started_at = datetime.now(timezone.utc)
             await current_user.save()
         
-        # 2. Check Expiration (7 Days)
+        # 2. Check Expiration (3 Days)
         now = datetime.now(timezone.utc)
         start = current_user.trial_started_at.replace(tzinfo=timezone.utc) if current_user.trial_started_at.tzinfo is None else current_user.trial_started_at
         days_passed = (now - start).days
 
-        if days_passed < 7:
+        if days_passed < 3:
             settings = await SystemSettings.find_one()
             if not settings:
                 settings = SystemSettings()
@@ -624,7 +624,7 @@ async def get_profile(current_user: User = Depends(get_current_user)):
                 "can_forward": settings.demo_can_forward,
                 "can_react": settings.demo_can_react,
                 "is_demo": True,
-                "trial_days_left": max(0, 7 - days_passed)
+                "trial_days_left": max(0, 3 - days_passed)
             }
         else:
             plan_details = None
@@ -638,7 +638,7 @@ async def get_profile(current_user: User = Depends(get_current_user)):
         "is_active": current_user.is_active,
         "plan_id": current_user.plan_id,
         "plan_expiry_at": (current_user.plan_expiry_at.isoformat() if current_user.plan_expiry_at else None) if current_user.plan_id else (
-            (current_user.trial_started_at + timedelta(days=7)).isoformat() if getattr(current_user, 'trial_started_at', None) else None
+            (current_user.trial_started_at + timedelta(days=3)).isoformat() if getattr(current_user, 'trial_started_at', None) else None
         ),
         "billing_cycle": current_user.billing_cycle,
         "wallet_balance": getattr(current_user, "wallet_balance", 0.0),

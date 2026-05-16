@@ -5,6 +5,7 @@ from app.models import User, TelegramAccount
 from app.services.auto_reply.engine import detach_account, attach_handler
 from app.services.forwarder.logic import start_forwarder_for_account, stop_forwarder_for_rule
 from app.services.terminal_service import terminal_manager
+from app.services.account_aging import start_aging, stop_aging
 from app.client_cache import get_client, invalidate
 from app.models.auto_reply import AutoReplySettings
 import logging
@@ -39,6 +40,11 @@ async def stop_all_services(current_user: User = Depends(get_current_user)):
         from app.services.forwarder.logic import stop_all_forwarders_for_account
         await stop_all_forwarders_for_account(acc_id)
 
+        # ── NEW: CLEAR MEMORY CACHE ──
+        # This disconnects the client and removes it from RAM pool
+        from app.client_cache import invalidate
+        await invalidate(acc_id)
+
     # 3. Stop Reaction Tasks (Mark monitoring ones as cancelled/paused)
     from app.models.reaction import ReactionTask
     from app.services.reaction.logic import _reaction_handlers
@@ -70,6 +76,20 @@ async def stop_all_services(current_user: User = Depends(get_current_user)):
         for acc_id, task in list(GROUP_JOIN_TASKS[user_id].items()):
             task.stop_requested = True
             # Keeps status as 'running' for resumption
+
+    # 7. Stop Member Adder & Message Campaign
+    from app.services.member_adder import MEMBER_ADDER_TASKS
+    if user_id in MEMBER_ADDER_TASKS:
+        MEMBER_ADDER_TASKS[user_id].stop_requested = True
+        del MEMBER_ADDER_TASKS[user_id]
+        
+    from app.services.message_campaign import MESSAGE_CAMPAIGN_TASKS
+    if user_id in MESSAGE_CAMPAIGN_TASKS:
+        MESSAGE_CAMPAIGN_TASKS[user_id].stop_requested = True
+        del MESSAGE_CAMPAIGN_TASKS[user_id]
+
+    # 8. Stop Account Aging
+    await stop_aging(user_id)
 
     await terminal_manager.log_event(user_id, "⏹️ GLOBAL STOP: Auto-Reply, Forwarders, Bots, and Boosters PAUSED.", "system", "system", "WARNING")
 
@@ -264,6 +284,9 @@ async def start_all_services(options: StartOptions, current_user: User = Depends
             asyncio.create_task(task.run())
             
         await terminal_manager.log_event(user_id, "🔗 Group Joiner module READY and ENABLED.", "system", "group_join", "SUCCESS")
+
+    # 9. Start Account Aging
+    await start_aging(user_id)
 
     # Update User session stats
     current_user.services_active = True

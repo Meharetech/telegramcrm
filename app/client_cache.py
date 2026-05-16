@@ -32,6 +32,32 @@ from app.models import TelegramAccount, Proxy
 
 logger = logging.getLogger(__name__)
 
+async def handle_session_security_error(account_id: str, error_str: str):
+    """
+    Centrally handles session conflict / IP errors and Frozen accounts.
+    """
+    error_lower = error_str.lower()
+    from app.services.terminal_service import terminal_manager
+    from app.models import TelegramAccount
+    
+    # 1. Handle Session Revocation (Delete Account)
+    if any(x in error_lower for x in ["different ip", "authorization key", "session_revoked"]):
+        from app.api.accounts.utils import handle_account_death
+        success = await handle_account_death(account_id, reason="Session Conflict (Multiple IPs)")
+        if success:
+            logger.error(f"[SECURITY] Account {account_id} REMOVED from system due to session/IP conflict.")
+            return True
+            
+    # 2. Handle Frozen Account (Delete Account)
+    if "frozen" in error_lower:
+        from app.api.accounts.utils import handle_account_death
+        success = await handle_account_death(account_id, reason="Account Frozen by Telegram")
+        if success:
+            logger.error(f"[SECURITY] Account {account_id} REMOVED from system due to Frozen status.")
+            return True
+            
+    return False
+
 # { account_id: TelegramClient }
 _cache: Dict[str, TelegramClient] = {}
 # { account_id: datetime } — timestamp of last activity
@@ -54,7 +80,7 @@ def _get_lock(account_id: str) -> asyncio.Lock:
         _locks[account_id] = asyncio.Lock()
     return _locks[account_id]
 
-
+ 
 async def _run_maintenance():
     """
     Background worker to prevent RAM bloat.
@@ -147,6 +173,12 @@ async def get_client(
                     # We don't raise here, we let it fall through to fresh creation which will fail too if key is dead
                 except Exception as e:
                     print(f"[RECONNECT_FAILED] Account {account_id} loop failed: {e}")
+                    if await handle_session_security_error(account_id, str(e)):
+                        from fastapi import HTTPException
+                        detail = "🚨 SECURITY ALERT: Account session revoked. It has been removed."
+                        if "frozen" in str(e).lower():
+                            detail = "❄️ ACCOUNT FROZEN: Telegram has restricted this account. Profile updates are disabled."
+                        raise HTTPException(status_code=403, detail=detail)
                 
                 # Reconnect failed — fall through to create a new client
                 logger.warning(f"[cache] In-place reconnect failed for {account_id}, creating fresh client")
@@ -273,6 +305,21 @@ async def get_client(
             
             if user_id and user_id != "unknown":
                 await terminal_manager.log_event(user_id, final_msg, account_id, "system", "ERROR")
+            
+            # ── NEW: HANDLE SESSION CONFLICT / FROZEN ACCOUNT ─────────────────
+            # Disconnect the orphaned client before raising/handling
+            try:
+                await client.disconnect()
+            except: pass
+
+            if await handle_session_security_error(account_id, error_str):
+                from fastapi import HTTPException
+                detail = "🚨 SECURITY ALERT: Account session revoked. It has been removed."
+                if "frozen" in error_str.lower():
+                    detail = "❄️ ACCOUNT FROZEN: Telegram has restricted this account. Profile updates are disabled."
+                
+                raise HTTPException(status_code=403, detail=detail)
+
             raise e
 
         _cache[account_id] = client
@@ -316,34 +363,41 @@ async def refresh_user_status_cache(user_id: str):
     _user_active_expiry.pop(user_id, None)
 
 
-async def invalidate(account_id: str) -> None:
+async def invalidate(account_id: str, use_lock: bool = True) -> None:
     """Remove a client from the cache (e.g. after logout or session error)."""
-    lock = _get_lock(account_id)
-    async with lock:
-        client = _cache.pop(account_id, None)
-        _last_used.pop(account_id, None)
-        # FIX: Also clear the WS handlers flag so they re-attach to the NEXT client instance
-        from app.api.ws import _ws_handlers_attached
-        _ws_handlers_attached.pop(account_id, None)
+    if use_lock:
+        lock = _get_lock(account_id)
+        async with lock:
+            await _perform_invalidation(account_id)
+    else:
+        await _perform_invalidation(account_id)
 
-        # Clear Auto-Reply handler flag to force re-attachment on next get_client
-        try:
-            from app.services.auto_reply.engine import _attached_handlers as ar_handlers
-            ar_handlers.pop(account_id, None)
-        except ImportError: pass
+async def _perform_invalidation(account_id: str) -> None:
+    """Internal core logic for invalidating a client."""
+    client = _cache.pop(account_id, None)
+    _last_used.pop(account_id, None)
+    # FIX: Also clear the WS handlers flag so they re-attach to the NEXT client instance
+    from app.api.ws import _ws_handlers_attached
+    _ws_handlers_attached.pop(account_id, None)
 
-        # Clear Forwarder handler flag to force re-attachment on next get_client
+    # Clear Auto-Reply handler flag to force re-attachment on next get_client
+    try:
+        from app.services.auto_reply.engine import _attached_handlers as ar_handlers
+        ar_handlers.pop(account_id, None)
+    except ImportError: pass
+
+    # Clear Forwarder handler flag to force re-attachment on next get_client
+    try:
+        from app.services.forwarder.logic import _attached_handlers as fwd_handlers
+        fwd_handlers.pop(account_id, None)
+    except ImportError: pass
+    
+    if client:
         try:
-            from app.services.forwarder.logic import _attached_handlers as fwd_handlers
-            fwd_handlers.pop(account_id, None)
-        except ImportError: pass
-        
-        if client:
-            try:
-                await client.disconnect()
-            except Exception:
-                pass
-        logger.info(f"[cache] Evicted client for {account_id}")
+            await client.disconnect()
+        except Exception:
+            pass
+    logger.info(f"[cache] Evicted client for {account_id}")
 
 async def prune_others(keep_account_id: str, active_user_id: str) -> int:
     """

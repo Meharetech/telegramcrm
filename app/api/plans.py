@@ -549,7 +549,7 @@ async def get_my_plan(current_user: User = Depends(get_current_user)):
         start = current_user.trial_started_at.replace(tzinfo=timezone.utc) if current_user.trial_started_at.tzinfo is None else current_user.trial_started_at
         days_passed = (now - start).days
         
-        if days_passed >= 7:
+        if days_passed >= 3:
             return {
                 "plan": None,
                 "expiry_at": None,
@@ -559,11 +559,11 @@ async def get_my_plan(current_user: User = Depends(get_current_user)):
             }
         
         demo_plan = await get_demo_plan_data()
-        demo_plan["trial_days_left"] = max(0, 7 - days_passed)
+        demo_plan["trial_days_left"] = max(0, 3 - days_passed)
 
         return {
             "plan": demo_plan,
-            "expiry_at": (start + timedelta(days=7)).isoformat(),
+            "expiry_at": (start + timedelta(days=3)).isoformat(),
             "is_expired": False,
             "services_active": getattr(current_user, "services_active", False)
         }
@@ -581,7 +581,7 @@ async def get_my_plan(current_user: User = Depends(get_current_user)):
             start = current_user.trial_started_at.replace(tzinfo=timezone.utc) if current_user.trial_started_at.tzinfo is None else current_user.trial_started_at
             days_passed = (now - start).days
             
-            if days_passed >= 7:
+            if days_passed >= 3:
                 return {
                     "plan": None,
                     "expiry_at": None,
@@ -591,11 +591,11 @@ async def get_my_plan(current_user: User = Depends(get_current_user)):
                 }
             
             demo_plan = await get_demo_plan_data()
-            demo_plan["trial_days_left"] = max(0, 7 - days_passed)
+            demo_plan["trial_days_left"] = max(0, 3 - days_passed)
 
             return {
                 "plan": demo_plan,
-                "expiry_at": (start + timedelta(days=7)).isoformat(),
+                "expiry_at": (start + timedelta(days=3)).isoformat(),
                 "is_expired": False,
                 "services_active": getattr(current_user, "services_active", False)
             }

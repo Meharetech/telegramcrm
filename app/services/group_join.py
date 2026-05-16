@@ -59,15 +59,16 @@ class ActiveGroupJoiner:
             await self.client.connect()
         return self.client
 
-    async def join_one(self, link: str):
+    async def join_one(self, link: str, link_idx: int = None, total_links: int = None):
         if self.status != "running": return
         
         clean_link = link.strip().replace("https://t.me/", "").replace("t.me/", "").replace("@", "")
         if not clean_link: return
 
+        idx_str = f"[{link_idx}/{total_links}] " if link_idx else ""
         try:
             verb_ing = "joining" if self.task_type == "join" else "leaving"
-            await self.add_log("log", f"⏳ Attempting to {verb_ing.replace('ing', '')}: {clean_link}...", "INFO")
+            await self.add_log("log", f"{idx_str}⏳ Attempting to {verb_ing.replace('ing', '')}: {clean_link}...", "INFO")
             
             client = await self.get_client()
             if not client: return
@@ -83,36 +84,38 @@ class ActiveGroupJoiner:
                         await asyncio.wait_for(client(ImportChatInviteRequest(hash_code)), timeout=30)
                     else:
                         await asyncio.wait_for(client(JoinChannelRequest(clean_link)), timeout=30)
-                    await self.add_log("progress", f"✅ Joined: {clean_link}", "SUCCESS", data={"done": self.done_count + 1, "total": self.total_count})
+                    
+                    self.done_count += 1
+                    await self.add_log("progress", f"{idx_str}✅ Joined: {clean_link}", "SUCCESS", data={"done": self.done_count, "total": self.total_count})
                 else:
                     await asyncio.wait_for(client(LeaveChannelRequest(clean_link)), timeout=30)
-                    await self.add_log("progress", f"✅ Left: {clean_link}", "SUCCESS", data={"done": self.done_count + 1, "total": self.total_count})
+                    self.done_count += 1
+                    await self.add_log("progress", f"{idx_str}✅ Left: {clean_link}", "SUCCESS", data={"done": self.done_count, "total": self.total_count})
                 
-                self.done_count += 1
             except asyncio.TimeoutError:
-                await self.add_log("log", f"⚠️ Timeout {verb_ing} {clean_link}. Skipping...", "WARNING")
+                await self.add_log("log", f"{idx_str}⚠️ Timeout {verb_ing} {clean_link}. Skipping...", "WARNING")
             except InviteHashExpiredError:
-                await self.add_log("log", f"⚠️ Link expired: {clean_link}", "WARNING")
+                await self.add_log("log", f"{idx_str}⚠️ Link expired: {clean_link}", "WARNING")
             except InviteHashInvalidError:
-                await self.add_log("log", f"⚠️ Invalid link: {clean_link}", "WARNING")
+                await self.add_log("log", f"{idx_str}⚠️ Invalid link: {clean_link}", "WARNING")
             except ChannelInvalidError:
-                await self.add_log("log", f"⚠️ Invalid Channel/Group: {clean_link}", "WARNING")
+                await self.add_log("log", f"{idx_str}⚠️ Invalid Channel/Group: {clean_link}", "WARNING")
             except UsernameInvalidError:
-                await self.add_log("log", f"⚠️ Incorrect link/username: {clean_link}", "WARNING")
+                await self.add_log("log", f"{idx_str}⚠️ Incorrect link/username: {clean_link}", "WARNING")
             except UsernameNotOccupiedError:
-                await self.add_log("log", f"⚠️ Username doesn't exist: {clean_link}", "WARNING")
+                await self.add_log("log", f"{idx_str}⚠️ Username doesn't exist: {clean_link}", "WARNING")
             except UserAlreadyParticipantError:
-                await self.add_log("progress", f"🤝 Already a member: {clean_link}", "SUCCESS", data={"done": self.done_count + 1, "total": self.total_count})
                 self.done_count += 1
+                await self.add_log("progress", f"{idx_str}🤝 Already a member: {clean_link}", "SUCCESS", data={"done": self.done_count, "total": self.total_count})
 
             except UsersTooMuchError:
-                await self.add_log("log", f"⚠️ Group full: {clean_link}", "WARNING")
+                await self.add_log("log", f"{idx_str}⚠️ Group full: {clean_link}", "WARNING")
             except ChannelPrivateError:
-                await self.add_log("log", f"⚠️ Private group access denied: {clean_link}", "WARNING")
+                await self.add_log("log", f"{idx_str}⚠️ Private group access denied: {clean_link}", "WARNING")
             except ChatAdminRequiredError:
-                await self.add_log("log", f"⚠️ Admin permission required: {clean_link}", "WARNING")
+                await self.add_log("log", f"{idx_str}⚠️ Admin permission required: {clean_link}", "WARNING")
             except UserBannedInChannelError:
-                await self.add_log("log", f"⚠️ Banned from group: {clean_link}", "WARNING")
+                await self.add_log("log", f"{idx_str}⚠️ Banned from group: {clean_link}", "WARNING")
             except ChannelsTooMuchError:
                 await self.add_log("error", "❌ Joined too many groups. Stopping account.", "ERROR")
                 self.status = "error"
@@ -127,7 +130,7 @@ class ActiveGroupJoiner:
                 return
 
         except FloodWaitError as e:
-            await self.add_log("log", f"⏳ Rate Limited: Must wait {e.seconds}s", "WARNING")
+            await self.add_log("log", f"{idx_str}⏳ Rate Limited: Must wait {e.seconds}s", "WARNING")
             self.flood_wait_until = asyncio.get_event_loop().time() + e.seconds
         except (AuthKeyUnregisteredError, SessionRevokedError, PhoneNumberBannedError):
             from app.api.accounts.utils import handle_account_death
@@ -135,12 +138,12 @@ class ActiveGroupJoiner:
             await handle_account_death(self.account_id, "DEAD_DURING_JOINER")
             self.status = "error"
         except ConnectionError:
-            await self.add_log("log", f"⚠️ Connection issue with {clean_link}. Skipping turn.", "WARNING")
+            await self.add_log("log", f"{idx_str}⚠️ Connection issue with {clean_link}. Skipping turn.", "WARNING")
         except RPCError as e:
-            await self.add_log("log", f"❌ Telegram API Error: {str(e)}", "ERROR")
+            await self.add_log("log", f"{idx_str}❌ Telegram API Error: {str(e)}", "ERROR")
             await asyncio.sleep(5)
         except Exception as e:
-            await self.add_log("log", f"❌ Unexpected Error: {str(e)}", "ERROR")
+            await self.add_log("log", f"{idx_str}❌ Unexpected Error: {str(e)}", "ERROR")
             await asyncio.sleep(5)
 
 
@@ -208,9 +211,9 @@ class ActiveGroupJoiner:
         # Legacy run method for single account tasks (if still used)
         try:
             await self.add_log("status", f"🚀 Starting process for {self.total_count} groups...")
-            for link in self.links[self.done_count:]:
+            for i, link in enumerate(self.links[self.done_count:]):
                 if self.stop_requested: break
-                await self.join_one(link)
+                await self.join_one(link, i + 1, len(self.links))
                 if self.done_count < self.total_count:
                     await asyncio.sleep(self.interval)
             
@@ -276,17 +279,17 @@ class GroupJoinRotationManager:
                     await task.add_log("status", f"🚀 Rotation started. Assigned {task.total_count} groups.", data={"total": task.total_count})
 
             # Execution Sequence
-            execution_plan = []
+            execution_plan = [] # List of (link, acc_id, link_idx, total_links)
             if self.join_mode == "mass":
-                for link in self.links:
+                for l_idx, link in enumerate(self.links):
                     for acc_id in acc_ids:
-                        execution_plan.append((link, acc_id))
+                        execution_plan.append((link, acc_id, l_idx + 1, len(self.links)))
             else:
                 for i, link in enumerate(self.links):
                     acc_id = acc_ids[i % len(acc_ids)]
-                    execution_plan.append((link, acc_id))
+                    execution_plan.append((link, acc_id, i + 1, len(self.links)))
 
-            for i, (link, acc_id) in enumerate(execution_plan):
+            for i, (link, acc_id, l_idx, l_total) in enumerate(execution_plan):
                 if self.stop_requested:
                     await self.broadcast({"event": "log", "data": json.dumps({
                         "msg": "🛑 Mission Aborted by User.",
@@ -299,7 +302,7 @@ class GroupJoinRotationManager:
                 task = self.account_tasks[acc_id]
                 if task.status not in ["running"]: continue
 
-                await self.broadcast({"event": "active_account", "data": json.dumps({"id": acc_id, "phone": task.phone_number})})
+                await self.broadcast({"event": "active_account", "data": json.dumps({"id": acc_id, "phone": task.phone_number, "link": link, "idx": l_idx, "total": l_total})})
                 
                 now = asyncio.get_event_loop().time()
                 if task.flood_wait_until > now:
@@ -307,7 +310,7 @@ class GroupJoinRotationManager:
                     await task.add_log("log", f"⏳ Account in FloodWait ({wait_remaining}s). Skipping turn.", "WARNING")
                     continue
 
-                await task.join_one(link)
+                await task.join_one(link, l_idx, l_total)
                 
                 if i < len(execution_plan) - 1:
                     jitter = random.randint(-2, 2) if self.interval > 5 else 0

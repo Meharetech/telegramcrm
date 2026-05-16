@@ -1,5 +1,6 @@
 from datetime import datetime
 from telethon import types
+from bson import ObjectId
 
 def format_status(status):
     if not status:
@@ -55,15 +56,24 @@ async def handle_account_death(account_id: str, account=None, reason: str = "Unk
         active_client = _cache.get(account_id)
         if active_client:
             await detach_account(active_client, account_id)
-        await invalidate(account_id)
+        await invalidate(account_id, use_lock=False)
         
         # 2. Clean up all related settings/rules
         await AutoReplySettings.find(AutoReplySettings.account_id == account_id).delete()
         await AutoReplyRule.find(AutoReplyRule.account_id == account_id).delete()
         await ForwarderRule.find(ForwarderRule.account_id == account_id).delete()
+        
+        # ── NEW: Remove from Aging Selection ──
+        from app.models.account_aging import AccountAgingTask
+        aging_tasks = await AccountAgingTask.find(AccountAgingTask.selected_account_ids == account_id).to_list()
+        for t in aging_tasks:
+            t.selected_account_ids = [aid for aid in t.selected_account_ids if aid != account_id]
+            await t.save()
+            logger.info(f"[cleanup] Removed {account_id} from Aging selection for user {t.user_id}")
 
         # 3. Finally remove from database
-        await account.delete()
+        await TelegramAccount.find_one(TelegramAccount.id == ObjectId(account_id)).delete()
+        logger.info(f"[cleanup] Account {account_id} successfully purged from database.")
         return True
     except Exception as e:
         logger.error(f"[cleanup] Critical error during account cleanup for {account_id}: {e}")

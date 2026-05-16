@@ -51,6 +51,8 @@ async def update_profile(
         ))
         return {"status": "success"}
     except Exception as e:
+        from app.client_cache import handle_session_security_error
+        await handle_session_security_error(account_id, str(e))
         raise HTTPException(status_code=400, detail=str(e))
 
 @router.post("/update-username/{account_id}")
@@ -65,6 +67,8 @@ async def update_username(account_id: str, username: str = Form(...)):
         await client(functions.account.UpdateUsernameRequest(username=username))
         return {"status": "success"}
     except Exception as e:
+        from app.client_cache import handle_session_security_error
+        await handle_session_security_error(account_id, str(e))
         raise HTTPException(status_code=400, detail=str(e))
 
 @router.post("/update-photo/{account_id}")
@@ -165,6 +169,9 @@ async def set_random_profile(account_id: str, settings: RandomizeSettings = Rand
     account = await TelegramAccount.get(account_id)
     if not account:
         raise HTTPException(status_code=404, detail="Account not found")
+    
+    if account.status == "frozen":
+        raise HTTPException(status_code=403, detail="❄️ ACCOUNT FROZEN: This account is restricted by Telegram and cannot be updated.")
         
     client = await get_client(account_id, account.session_string, account.api_id, account.api_hash, device_model=getattr(account, 'device_model', 'Telegram Android'))
     
@@ -248,6 +255,8 @@ async def set_random_profile(account_id: str, settings: RandomizeSettings = Rand
             }
         }
     except Exception as e:
+        from app.client_cache import handle_session_security_error
+        await handle_session_security_error(account_id, str(e))
         import traceback
         error_msg = f"Telegram Error: {str(e)}"
         print(error_msg)
@@ -273,6 +282,9 @@ async def check_profile(account_id: str):
     account = await TelegramAccount.get(account_id)
     if not account:
         raise HTTPException(status_code=404, detail="Account not found")
+    
+    if account.status == "frozen":
+        raise HTTPException(status_code=403, detail="❄️ ACCOUNT FROZEN: This account is restricted and cannot be synced currently.")
         
     try:
         client = await get_client(account_id, account.session_string, account.api_id, account.api_hash, device_model=getattr(account, 'device_model', 'Telegram Android'))
