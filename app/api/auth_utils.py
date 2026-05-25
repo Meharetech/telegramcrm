@@ -113,6 +113,7 @@ async def check_plan_limit(user: User, field: str, current_count: Optional[int] 
         "access_bot_hub": True,
         "access_ai_agent": False,
         "access_account_aging": False,
+        "access_reports": settings.demo_access_reports,
         "ai_chatbot_limit": settings.demo_ai_chatbot_limit,
         "max_ai_agents": settings.demo_max_ai_agents
     }
@@ -167,6 +168,7 @@ async def check_plan_limit(user: User, field: str, current_count: Optional[int] 
         demo_limits["can_react"] = getattr(sys_settings, "demo_can_react", False)
         demo_limits["access_ai_agent"] = getattr(sys_settings, "demo_access_ai_agent", False)
         demo_limits["access_account_aging"] = getattr(sys_settings, "demo_access_account_aging", False)
+        demo_limits["access_reports"] = getattr(sys_settings, "demo_access_reports", False)
         demo_limits["ai_chatbot_limit"] = getattr(sys_settings, "demo_ai_chatbot_limit", 200)
         demo_limits["max_ai_agents"] = getattr(sys_settings, "demo_max_ai_agents", 1)
     else:
@@ -191,6 +193,7 @@ async def check_plan_limit(user: User, field: str, current_count: Optional[int] 
         demo_limits["can_react"] = True
         demo_limits["access_ai_agent"] = True
         demo_limits["access_account_aging"] = True
+        demo_limits["access_reports"] = True
         demo_limits["ai_chatbot_limit"] = 200
         demo_limits["max_ai_agents"] = 1
 
@@ -283,7 +286,8 @@ async def check_plan_limit(user: User, field: str, current_count: Optional[int] 
         "access_group_joiner": "group_joiner",
         "max_ai_agents": "ai_agent",
         "access_ai_agent": "ai_agent",
-        "access_account_aging": "aging"
+        "access_account_aging": "aging",
+        "access_reports": "reports"
     }
     
     svc_id = service_map.get(field)

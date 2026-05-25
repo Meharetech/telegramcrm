@@ -18,6 +18,7 @@ from app.models import (
 from app.models.auto_reply import AutoReplyRule, AutoReplySettings
 from app.models.folder_campaign import FolderCampaignJob
 from app.models.group_join import GroupJoinJob
+from app.models.report_job import ReportJob
 from app.api.accounts import router as account_router
 from app.api.auto_reply import router as auto_reply_router
 from app.api.forwarder import router as forwarder_router
@@ -260,7 +261,7 @@ async def lifespan(app: FastAPI):
                 ForwarderRule, TelegramAPI, ReactionTask, Reminder, Proxy, SystemLog,
                 MemberAddSettings, MemberAddJob, MemberAddSchedule, MessageCampaignJob, MessageCampaignSchedule, Plan, Payment,
                 SystemSettings, BotForwarder, WalletTransaction, ShopPurchase, FolderCampaignJob, GroupJoinJob,
-                AiAgent, AiKnowledgeSummary, AiReplyLog, AiSettings, AccountAgingTask
+                AiAgent, AiKnowledgeSummary, AiReplyLog, AiSettings, AccountAgingTask, ReportJob
             ]
         )
 
@@ -343,6 +344,7 @@ from app.api.member_adder import router as member_adder_router
 from app.api.member_add_schedule import router as member_add_schedule_router
 from app.api.message_campaign import router as message_campaign_router
 from app.api.group_join import router as group_join_router
+from app.api.reports import router as reports_router
 
 app.include_router(account_router,    prefix="/api/accounts",    tags=["Accounts"])
 app.include_router(auto_reply_router, prefix="/api/auto-reply",  tags=["AutoReply"])
@@ -366,6 +368,7 @@ app.include_router(folder_campaign_router, prefix="/api/folder-campaign", tags=[
 app.include_router(group_join_router, prefix="/api/group-join", tags=["Group Joiner"])
 app.include_router(ai_agent_router, prefix="/api/ai-agent", tags=["AI Agent"])
 app.include_router(account_aging_router, prefix="/api/account-aging", tags=["Account Aging"])
+app.include_router(reports_router, prefix="/api/reports", tags=["Reports"])
 app.include_router(ws_router,         prefix="/api",             tags=["WebSockets"])
 
 @app.get("/")

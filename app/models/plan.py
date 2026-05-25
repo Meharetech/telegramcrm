@@ -46,6 +46,7 @@ class Plan(Document):
     access_group_joiner: bool = False     # Group joiner tool
     access_ai_agent: bool = False         # AI Chatbot Agent Access
     access_account_aging: bool = False    # Account Aging Access
+    access_reports: bool = False          # Reports Campaign Access
 
     class Settings:
         name = "plans"

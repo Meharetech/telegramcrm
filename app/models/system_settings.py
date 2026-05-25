@@ -57,6 +57,7 @@ class SystemSettings(Document):
     demo_access_ban_checker: bool = False
     demo_access_ai_agent: bool = False
     demo_access_account_aging: bool = False
+    demo_access_reports: bool = False
     
     # Demo Quantity Limits
     demo_max_auto_replies: int = 1

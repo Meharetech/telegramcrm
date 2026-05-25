@@ -412,10 +412,24 @@ class ActiveMemberAdder:
                             continue
 
                         if self.stop_requested: break
-                        await acc_task["client"](functions.channels.InviteToChannelRequest(
-                            channel=acc_task["target_group"],
-                            users=[resolved]
-                        ))
+
+                        target_entity = acc_task["target_group"]
+                        if isinstance(target_entity, types.Channel):
+                            await acc_task["client"](functions.channels.InviteToChannelRequest(
+                                channel=target_entity,
+                                users=[resolved]
+                            ))
+                        elif isinstance(target_entity, types.Chat):
+                            await acc_task["client"](functions.messages.AddChatUserRequest(
+                                chat_id=target_entity.id,
+                                user_id=resolved,
+                                fwd_limit=10
+                            ))
+                        else:
+                            await acc_task["client"](functions.channels.InviteToChannelRequest(
+                                channel=target_entity,
+                                users=[resolved]
+                            ))
 
                         self.done_count += 1
                         acc_task["this_task_done"] += 1

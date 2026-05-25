@@ -41,7 +41,8 @@ async def create_default_plans():
             "access_reminders": True,
             "access_terminal": False,
             "access_bot_hub": True,
-            "access_ai_agent": True
+            "access_ai_agent": True,
+            "access_reports": True
         },
         {
             "name": "Venom Starter",
@@ -70,7 +71,8 @@ async def create_default_plans():
             "access_contacts_manager": False,
             "access_reminders": False,
             "access_terminal": False,
-            "access_ai_agent": True
+            "access_ai_agent": True,
+            "access_reports": False
         },
         {
             "name": "Venom PRO (Most Popular)",
@@ -99,7 +101,8 @@ async def create_default_plans():
             "access_contacts_manager": True,
             "access_reminders": True,
             "access_terminal": False,
-            "access_ai_agent": True
+            "access_ai_agent": True,
+            "access_reports": True
         },
         {
             "name": "Venom ELITE (Unlimited)",
@@ -128,7 +131,8 @@ async def create_default_plans():
             "access_contacts_manager": True,
             "access_reminders": True,
             "access_terminal": True,
-            "access_ai_agent": True
+            "access_ai_agent": True,
+            "access_reports": True
         }
     ]
     

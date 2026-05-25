@@ -84,9 +84,9 @@ class PlanCreate(BaseModel):
     access_bot_hub: bool = False
     access_folder_campaign: bool = False
     access_folder_scraper: bool = False
-    access_group_joiner: bool = False
     access_ai_agent: bool = False
     access_account_aging: bool = False
+    access_reports: bool = False
     max_bots: int = 1
     max_folder_accounts: int = 1
     ai_chatbot_limit: int = -1
@@ -122,6 +122,7 @@ class PlanUpdate(BaseModel):
     access_group_joiner: Optional[bool] = None
     access_ai_agent: Optional[bool] = None
     access_account_aging: Optional[bool] = None
+    access_reports: Optional[bool] = None
     max_bots: Optional[int] = None
     max_folder_accounts: Optional[int] = None
     ai_chatbot_limit: Optional[int] = None
@@ -191,6 +192,7 @@ class SystemSettingsSchema(BaseModel):
     demo_access_ban_checker: bool = False
     demo_access_ai_agent: bool = False
     demo_access_account_aging: bool = False
+    demo_access_reports: bool = False
     demo_max_auto_replies: int = 1
     demo_max_reaction_channels: int = 1
     demo_max_forwarder_channels: int = 1
@@ -257,6 +259,7 @@ def plan_to_dict(p: Plan) -> dict:
         "access_group_joiner": getattr(p, "access_group_joiner", False),
         "access_ai_agent": getattr(p, "access_ai_agent", False),
         "access_account_aging": getattr(p, "access_account_aging", False),
+        "access_reports": getattr(p, "access_reports", False),
         "max_bots": getattr(p, "max_bots", 1),
         "max_folder_accounts": getattr(p, "max_folder_accounts", 1),
         "ai_chatbot_limit": getattr(p, "ai_chatbot_limit", -1),
@@ -293,6 +296,7 @@ async def get_demo_plan_data() -> dict:
         "access_ban_checker": getattr(settings_db, "demo_access_ban_checker", False),
         "access_ai_agent": getattr(settings_db, "demo_access_ai_agent", False),
         "access_account_aging": getattr(settings_db, "demo_access_account_aging", False),
+        "access_reports": getattr(settings_db, "demo_access_reports", False),
         "can_auto_reply": getattr(settings_db, "demo_can_auto_reply", False),
         "can_forward": getattr(settings_db, "demo_can_forward", False),
         "can_react": getattr(settings_db, "demo_can_react", False),
@@ -620,7 +624,8 @@ async def get_my_plan(current_user: User = Depends(get_current_user)):
             "contacts": ["access_contacts_manager"],
             "reminders": ["access_reminders"],
             "connect": ["access_connect"],
-            "ai_agent": ["access_ai_agent"]
+            "ai_agent": ["access_ai_agent"],
+            "reports": ["access_reports"]
         }
 
         # 1. Apply Force-Disables (Highest Priority)
