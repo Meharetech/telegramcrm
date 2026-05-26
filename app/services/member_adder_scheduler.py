@@ -1,12 +1,39 @@
 import asyncio
 import logging
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from app.models import MemberAddSchedule, User
 from app.services.member_adder import ActiveMemberAdder, MEMBER_ADDER_TASKS
 from app.services.terminal_service import terminal_manager
+from app.config import settings
 
 logger = logging.getLogger(__name__)
+
+def get_localized_now() -> datetime:
+    tz_str = getattr(settings, "SYSTEM_TIMEZONE", "Asia/Kolkata")
+    
+    # 1. Try ZoneInfo from standard library
+    try:
+        from zoneinfo import ZoneInfo
+        return datetime.now(ZoneInfo(tz_str))
+    except Exception:
+        pass
+        
+    # 2. Try parsing offset strings like +05:30 or -08:00
+    try:
+        if tz_str.startswith(("+", "-")):
+            sign = 1 if tz_str[0] == "+" else -1
+            parts = tz_str[1:].split(":")
+            hours = int(parts[0])
+            minutes = int(parts[1]) if len(parts) > 1 else 0
+            offset = timedelta(hours=hours, minutes=minutes) * sign
+            return datetime.now(timezone(offset))
+    except Exception:
+        pass
+        
+    # 3. Safe fallback: Indian Standard Time (IST, UTC+5:30)
+    ist_offset = timezone(timedelta(hours=5, minutes=30))
+    return datetime.now(ist_offset)
 
 async def start_member_adder_scheduler():
     """Background loop: check for due daily member adding missions every 60 seconds."""
@@ -23,7 +50,7 @@ async def start_member_adder_scheduler():
 
 async def check_and_trigger_schedules():
     """Find all active schedules that are due to run at this exact time."""
-    now = datetime.now()
+    now = get_localized_now()
     current_time_str = now.strftime("%H:%M")
     current_date_str = now.strftime("%Y-%m-%d")
     

@@ -37,6 +37,9 @@ class Settings(BaseSettings):
     MA_COOLDOWN_MAX: int = 86400    # Absolute max cooldown for any error
     MA_COOLDOWN_24H: int = 86400
 
+    # Regional Settings
+    SYSTEM_TIMEZONE: str = "Asia/Kolkata"
+
     # Email Settings (for OTP)
     SMTP_HOST: str = "smtp.gmail.com"
     SMTP_PORT: int = 587
