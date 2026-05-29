@@ -51,6 +51,7 @@ class ActiveGroupJoiner:
         
         acc = await TelegramAccount.get(ObjectId(self.account_id))
         if not acc or not acc.is_active:
+            self.status = "error"
             await self.add_log("error", "❌ Account not found or inactive.", "ERROR")
             return None
         
@@ -60,10 +61,10 @@ class ActiveGroupJoiner:
         return self.client
 
     async def join_one(self, link: str, link_idx: int = None, total_links: int = None):
-        if self.status != "running": return
+        if self.status != "running": return False
         
         clean_link = link.strip().replace("https://t.me/", "").replace("t.me/", "").replace("@", "")
-        if not clean_link: return
+        if not clean_link: return False
 
         idx_str = f"[{link_idx}/{total_links}] " if link_idx else ""
         try:
@@ -71,7 +72,9 @@ class ActiveGroupJoiner:
             await self.add_log("log", f"{idx_str}⏳ Attempting to {verb_ing.replace('ing', '')}: {clean_link}...", "INFO")
             
             client = await self.get_client()
-            if not client: return
+            if not client:
+                self.status = "error"
+                return False
 
             # Join/Leave logic with timeout
             from telethon.tl.functions.messages import ImportChatInviteRequest
@@ -87,64 +90,82 @@ class ActiveGroupJoiner:
                     
                     self.done_count += 1
                     await self.add_log("progress", f"{idx_str}✅ Joined: {clean_link}", "SUCCESS", data={"done": self.done_count, "total": self.total_count})
+                    return True
                 else:
                     await asyncio.wait_for(client(LeaveChannelRequest(clean_link)), timeout=30)
                     self.done_count += 1
                     await self.add_log("progress", f"{idx_str}✅ Left: {clean_link}", "SUCCESS", data={"done": self.done_count, "total": self.total_count})
+                    return True
                 
             except asyncio.TimeoutError:
                 await self.add_log("log", f"{idx_str}⚠️ Timeout {verb_ing} {clean_link}. Skipping...", "WARNING")
+                return False
             except InviteHashExpiredError:
                 await self.add_log("log", f"{idx_str}⚠️ Link expired: {clean_link}", "WARNING")
+                return False
             except InviteHashInvalidError:
                 await self.add_log("log", f"{idx_str}⚠️ Invalid link: {clean_link}", "WARNING")
+                return False
             except ChannelInvalidError:
                 await self.add_log("log", f"{idx_str}⚠️ Invalid Channel/Group: {clean_link}", "WARNING")
+                return False
             except UsernameInvalidError:
                 await self.add_log("log", f"{idx_str}⚠️ Incorrect link/username: {clean_link}", "WARNING")
+                return False
             except UsernameNotOccupiedError:
                 await self.add_log("log", f"{idx_str}⚠️ Username doesn't exist: {clean_link}", "WARNING")
+                return False
             except UserAlreadyParticipantError:
                 self.done_count += 1
                 await self.add_log("progress", f"{idx_str}🤝 Already a member: {clean_link}", "SUCCESS", data={"done": self.done_count, "total": self.total_count})
+                return True
 
             except UsersTooMuchError:
                 await self.add_log("log", f"{idx_str}⚠️ Group full: {clean_link}", "WARNING")
+                return False
             except ChannelPrivateError:
                 await self.add_log("log", f"{idx_str}⚠️ Private group access denied: {clean_link}", "WARNING")
+                return False
             except ChatAdminRequiredError:
                 await self.add_log("log", f"{idx_str}⚠️ Admin permission required: {clean_link}", "WARNING")
+                return False
             except UserBannedInChannelError:
                 await self.add_log("log", f"{idx_str}⚠️ Banned from group: {clean_link}", "WARNING")
+                return False
             except ChannelsTooMuchError:
+                self.status = "error"
                 await self.add_log("error", "❌ Joined too many groups. Stopping account.", "ERROR")
-                self.status = "error"
-                return
+                return False
             except UserRestrictedError:
+                self.status = "error"
                 await self.add_log("error", "❌ Account restricted by Telegram. Stopping account.", "ERROR")
-                self.status = "error"
-                return
+                return False
             except PeerFloodError:
-                await self.add_log("error", "❌ Peer Flood (Spam detection). Stopping account.", "ERROR")
                 self.status = "error"
-                return
+                await self.add_log("error", "❌ Peer Flood (Spam detection). Stopping account.", "ERROR")
+                return False
 
         except FloodWaitError as e:
             await self.add_log("log", f"{idx_str}⏳ Rate Limited: Must wait {e.seconds}s", "WARNING")
             self.flood_wait_until = asyncio.get_event_loop().time() + e.seconds
+            return False
         except (AuthKeyUnregisteredError, SessionRevokedError, PhoneNumberBannedError):
             from app.api.accounts.utils import handle_account_death
+            self.status = "error"
             await self.add_log("error", "❌ Account died during task.", "ERROR")
             await handle_account_death(self.account_id, "DEAD_DURING_JOINER")
-            self.status = "error"
+            return False
         except ConnectionError:
             await self.add_log("log", f"{idx_str}⚠️ Connection issue with {clean_link}. Skipping turn.", "WARNING")
+            return False
         except RPCError as e:
             await self.add_log("log", f"{idx_str}❌ Telegram API Error: {str(e)}", "ERROR")
             await asyncio.sleep(5)
+            return False
         except Exception as e:
             await self.add_log("log", f"{idx_str}❌ Unexpected Error: {str(e)}", "ERROR")
             await asyncio.sleep(5)
+            return False
 
 
 
@@ -152,27 +173,39 @@ class ActiveGroupJoiner:
     async def add_log(self, event: str, message: str, level: str = "INFO", data: dict = None):
         async with self.lock:
             ts = datetime.now().strftime("%I:%M:%S %p")
-            log_entry = {"msg": message, "level": level, "time": ts, "account_id": self.account_id, "batch_id": self.batch_id, "phone": self.phone_number, **(data or {})}
-
-            sse_msg = {"event": event, "data": json.dumps(log_entry)}
-
+            log_entry = {
+                "msg": message,
+                "level": level,
+                "time": ts,
+                "account_id": self.account_id,
+                "batch_id": self.batch_id,
+                "phone": self.phone_number,
+                "status": self.status,
+                **(data or {})
+            }
 
             self.logs.append(log_entry)
             if len(self.logs) > 50: self.logs.pop(0)
             
             for q in list(self.queues):
-                try: await q.put(sse_msg)
-                except: pass
+                try:
+                    await q.put({"event": event, "data": json.dumps(log_entry)})
+                    if event == "error":
+                        # Send as log event so frontend logs can display it too
+                        await q.put({"event": "log", "data": json.dumps(log_entry)})
+                except:
+                    pass
             
             # Also forward to manager if this task is part of a rotation
             if self.user_id in GROUP_JOIN_MANAGERS:
                 mgr = GROUP_JOIN_MANAGERS[self.user_id]
                 # We only forward if this task's batch matches the manager's batch
                 if mgr.batch_id == self.batch_id:
-                    await mgr.broadcast(sse_msg)
+                    await mgr.broadcast({"event": event, "data": json.dumps(log_entry)})
+                    if event == "error":
+                        await mgr.broadcast({"event": "log", "data": json.dumps(log_entry)})
                 
             if event in ["status", "done", "error"] or event == "progress":
-
                 await self.sync_to_db()
 
             if event in ["status", "done", "error"]:
@@ -241,11 +274,23 @@ class GroupJoinRotationManager:
         
         self.account_tasks: Dict[str, ActiveGroupJoiner] = {}
 
-        for acc in accounts_info:
-            acc_id = acc['id']
-            task = ActiveGroupJoiner(user_id, acc_id, acc['phone'], [], interval, batch_id, task_type)
-            self.account_tasks[acc_id] = task
-            
+        acc_ids = [acc['id'] for acc in accounts_info]
+        if self.join_mode == "mass":
+            for acc in accounts_info:
+                acc_id = acc['id']
+                task = ActiveGroupJoiner(user_id, acc_id, acc['phone'], links, interval, batch_id, task_type)
+                self.account_tasks[acc_id] = task
+        else:
+            assigned_links = {acc_id: [] for acc_id in acc_ids}
+            for i, link in enumerate(links):
+                acc_id = acc_ids[i % len(acc_ids)]
+                assigned_links[acc_id].append(link)
+            for acc in accounts_info:
+                acc_id = acc['id']
+                task = ActiveGroupJoiner(user_id, acc_id, acc['phone'], assigned_links[acc_id], interval, batch_id, task_type)
+                self.account_tasks[acc_id] = task
+
+        for acc_id, task in self.account_tasks.items():
             # Register in global dict so streaming still works
             if user_id not in GROUP_JOIN_TASKS:
                 GROUP_JOIN_TASKS[user_id] = {}
@@ -259,69 +304,103 @@ class GroupJoinRotationManager:
 
     async def run(self):
         try:
-            # Prepare tasks
             acc_ids = list(self.account_tasks.keys())
-            
-            if self.join_mode == "mass":
-                for task in self.account_tasks.values():
-                    task.links = self.links
-                    task.total_count = len(self.links)
-                    await task.add_log("status", f"🚀 Mass mode started. All {task.total_count} groups assigned.", data={"total": task.total_count})
-            else:
-                assigned_links = {acc_id: [] for acc_id in self.account_tasks}
-                for i, link in enumerate(self.links):
-                    acc_id = acc_ids[i % len(acc_ids)]
-                    assigned_links[acc_id].append(link)
-                
-                for acc_id, task in self.account_tasks.items():
-                    task.links = assigned_links[acc_id]
-                    task.total_count = len(assigned_links[acc_id])
-                    await task.add_log("status", f"🚀 Rotation started. Assigned {task.total_count} groups.", data={"total": task.total_count})
+            for task in self.account_tasks.values():
+                mode_str = "Mass mode started. All" if self.join_mode == "mass" else "Rotation started. Assigned"
+                await task.add_log("status", f"🚀 {mode_str} {task.total_count} groups.", data={"total": task.total_count})
 
-            # Execution Sequence
-            execution_plan = [] # List of (link, acc_id, link_idx, total_links)
             if self.join_mode == "mass":
+                # Mass mode: Every active account attempts to join every group
+                execution_plan = []
                 for l_idx, link in enumerate(self.links):
                     for acc_id in acc_ids:
                         execution_plan.append((link, acc_id, l_idx + 1, len(self.links)))
+
+                for i, (link, acc_id, l_idx, l_total) in enumerate(execution_plan):
+                    if self.stop_requested:
+                        await self.broadcast({"event": "log", "data": json.dumps({
+                            "msg": "🛑 Mission Aborted by User.",
+                            "level": "WARNING",
+                            "time": datetime.now().strftime("%I:%M:%S %p"),
+                            "account_id": "SYSTEM"
+                        })})
+                        break
+
+                    task = self.account_tasks[acc_id]
+                    if task.status not in ["running"]: continue
+
+                    await self.broadcast({"event": "active_account", "data": json.dumps({"id": acc_id, "phone": task.phone_number, "link": link, "idx": l_idx, "total": l_total})})
+
+                    now = asyncio.get_event_loop().time()
+                    if task.flood_wait_until > now:
+                        wait_remaining = int(task.flood_wait_until - now)
+                        await task.add_log("log", f"⏳ Account in FloodWait ({wait_remaining}s). Skipping this join.", "WARNING")
+                        continue
+
+                    await task.join_one(link, l_idx, l_total)
+
+                    if i < len(execution_plan) - 1:
+                        jitter = random.randint(-2, 2) if self.interval > 5 else 0
+                        wait_sec = max(2, self.interval + jitter)
+                        await self.broadcast({"event": "log", "data": json.dumps({
+                            "msg": f"⏳ Global cooldown: Waiting {wait_sec}s before next action...",
+                            "level": "INFO",
+                            "time": datetime.now().strftime("%I:%M:%S %p"),
+                            "account_id": "SYSTEM"
+                        })})
+                        await asyncio.sleep(wait_sec)
             else:
-                for i, link in enumerate(self.links):
-                    acc_id = acc_ids[i % len(acc_ids)]
-                    execution_plan.append((link, acc_id, i + 1, len(self.links)))
+                # Rotation mode: One account joins each group. 
+                # If an account has an error, we fall back to the next working account.
+                for l_idx, link in enumerate(self.links):
+                    if self.stop_requested:
+                        await self.broadcast({"event": "log", "data": json.dumps({
+                            "msg": "🛑 Mission Aborted by User.",
+                            "level": "WARNING",
+                            "time": datetime.now().strftime("%I:%M:%S %p"),
+                            "account_id": "SYSTEM"
+                        })})
+                        break
 
-            for i, (link, acc_id, l_idx, l_total) in enumerate(execution_plan):
-                if self.stop_requested:
-                    await self.broadcast({"event": "log", "data": json.dumps({
-                        "msg": "🛑 Mission Aborted by User.",
-                        "level": "WARNING",
-                        "time": datetime.now().strftime("%I:%M:%S %p"),
-                        "account_id": "SYSTEM"
-                    })})
-                    break
-                
-                task = self.account_tasks[acc_id]
-                if task.status not in ["running"]: continue
+                    l_number = l_idx + 1
+                    l_total = len(self.links)
 
-                await self.broadcast({"event": "active_account", "data": json.dumps({"id": acc_id, "phone": task.phone_number, "link": link, "idx": l_idx, "total": l_total})})
-                
-                now = asyncio.get_event_loop().time()
-                if task.flood_wait_until > now:
-                    wait_remaining = int(task.flood_wait_until - now)
-                    await task.add_log("log", f"⏳ Account in FloodWait ({wait_remaining}s). Skipping turn.", "WARNING")
-                    continue
+                    # Dynamic Round-Robin account selection
+                    start_acc_idx = l_idx % len(acc_ids)
+                    success = False
 
-                await task.join_one(link, l_idx, l_total)
-                
-                if i < len(execution_plan) - 1:
-                    jitter = random.randint(-2, 2) if self.interval > 5 else 0
-                    wait_sec = max(2, self.interval + jitter)
-                    await self.broadcast({"event": "log", "data": json.dumps({
-                        "msg": f"⏳ Global cooldown: Waiting {wait_sec}s before next action...",
-                        "level": "INFO",
-                        "time": datetime.now().strftime("%I:%M:%S %p"),
-                        "account_id": "SYSTEM"
-                    })})
-                    await asyncio.sleep(wait_sec)
+                    for attempt in range(len(acc_ids)):
+                        curr_acc_idx = (start_acc_idx + attempt) % len(acc_ids)
+                        curr_acc_id = acc_ids[curr_acc_idx]
+                        task = self.account_tasks[curr_acc_id]
+
+                        if task.status not in ["running"]:
+                            continue
+
+                        now = asyncio.get_event_loop().time()
+                        if task.flood_wait_until > now:
+                            wait_remaining = int(task.flood_wait_until - now)
+                            await task.add_log("log", f"⏳ Account {task.phone_number} in FloodWait ({wait_remaining}s). Skipping to next phone...", "WARNING")
+                            continue
+
+                        await self.broadcast({"event": "active_account", "data": json.dumps({"id": curr_acc_id, "phone": task.phone_number, "link": link, "idx": l_number, "total": l_total})})
+
+                        success = await task.join_one(link, l_number, l_total)
+                        if success:
+                            break
+                        else:
+                            await task.add_log("log", f"⚠️ Account {task.phone_number} failed to join {link}. Moving to next active phone...", "WARNING")
+
+                    if l_idx < len(self.links) - 1:
+                        jitter = random.randint(-2, 2) if self.interval > 5 else 0
+                        wait_sec = max(2, self.interval + jitter)
+                        await self.broadcast({"event": "log", "data": json.dumps({
+                            "msg": f"⏳ Global cooldown: Waiting {wait_sec}s before next link...",
+                            "level": "INFO",
+                            "time": datetime.now().strftime("%I:%M:%S %p"),
+                            "account_id": "SYSTEM"
+                        })})
+                        await asyncio.sleep(wait_sec)
 
             # Cleanup
             for task in self.account_tasks.values():

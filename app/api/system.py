@@ -253,7 +253,8 @@ async def start_all_services(options: StartOptions, current_user: User = Depends
 
     # 8. Group Joiner Status & Resumption
     if options.group_join:
-        from app.services.group_join import GroupJoinJob, ActiveGroupJoiner, GROUP_JOIN_TASKS
+        from app.models import GroupJoinJob
+        from app.services.group_join import ActiveGroupJoiner, GROUP_JOIN_TASKS
         
         running_join_jobs = await GroupJoinJob.find(
             GroupJoinJob.user_id == user_id,

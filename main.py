@@ -196,6 +196,29 @@ async def resume_background_services():
             FOLDER_CAMPAIGN_TASKS[job.user_id][job.account_id] = task
             asyncio.create_task(task.run())
 
+    # 5b. Resume Group Joiner Tasks
+    from app.models import GroupJoinJob
+    from app.services.group_join import ActiveGroupJoiner, GROUP_JOIN_TASKS
+    active_join_jobs = await GroupJoinJob.find(GroupJoinJob.status == "running").to_list()
+    for job in active_join_jobs:
+        if await is_user_active(job.user_id):
+            logger.info(f"[startup] Resuming GroupJoinJob for user {job.user_id} account {job.account_id}")
+            task = ActiveGroupJoiner(
+                user_id=job.user_id,
+                account_id=job.account_id,
+                phone_number=job.phone_number,
+                links=job.links,
+                interval=job.interval,
+                batch_id=job.batch_id,
+                task_type=job.task_type
+            )
+            task.job_id = str(job.id)
+            task.done_count = job.done_count
+            if job.user_id not in GROUP_JOIN_TASKS:
+                GROUP_JOIN_TASKS[job.user_id] = {}
+            GROUP_JOIN_TASKS[job.user_id][job.account_id] = task
+            asyncio.create_task(task.run())
+
     # 6. Resume Reaction Monitoring Tasks
     from app.services.reaction.logic import execute_reaction_boost
     active_reaction_tasks = await ReactionTask.find(ReactionTask.status == "monitoring").to_list()
