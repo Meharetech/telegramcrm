@@ -61,15 +61,6 @@ async def start_group_join(
     )
 
 
-    if not current_user.services_active:
-        # Just create the database records and mark as "waiting" or "running" but don't start
-        # The terminal service will likely start them later or the user will manual start
-        # For now, we'll follow the legacy logic of just syncing to DB
-        for task in manager.account_tasks.values():
-            task.status = "running"
-            await task.sync_to_db()
-        return {"status": "success", "message": f"{len(selected_accounts)} tasks queued. Start Terminal to begin."}
-
     GROUP_JOIN_MANAGERS[user_id] = manager
     asyncio.create_task(manager.run())
         

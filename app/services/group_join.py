@@ -155,16 +155,22 @@ class ActiveGroupJoiner:
             await self.add_log("error", "❌ Account died during task.", "ERROR")
             await handle_account_death(self.account_id, "DEAD_DURING_JOINER")
             return False
-        except ConnectionError:
-            await self.add_log("log", f"{idx_str}⚠️ Connection issue with {clean_link}. Skipping turn.", "WARNING")
+        except ConnectionError as e:
+            self.status = "error"
+            await self.add_log("error", f"❌ Connection Error: {str(e)}. Stopping account.", "ERROR")
             return False
         except RPCError as e:
             await self.add_log("log", f"{idx_str}❌ Telegram API Error: {str(e)}", "ERROR")
             await asyncio.sleep(5)
             return False
         except Exception as e:
-            await self.add_log("log", f"{idx_str}❌ Unexpected Error: {str(e)}", "ERROR")
-            await asyncio.sleep(5)
+            err_msg = str(e).lower()
+            if any(x in err_msg for x in ["proxy", "connection", "timeout", "refused", "reach", "socket", "socks"]):
+                self.status = "error"
+                await self.add_log("error", f"❌ Connection/Proxy Error: {str(e)}. Stopping account.", "ERROR")
+            else:
+                await self.add_log("log", f"{idx_str}❌ Unexpected Error: {str(e)}", "ERROR")
+                await asyncio.sleep(5)
             return False
 
 
@@ -243,6 +249,13 @@ class ActiveGroupJoiner:
     async def run(self):
         # Legacy run method for single account tasks (if still used)
         try:
+            from app.models.user import User
+            user = await User.get(self.user_id)
+            if not user or not user.services_active:
+                self.status = "error"
+                await self.add_log("error", "🛑 Task Aborted: User services are currently STOPPED.", "ERROR")
+                return
+
             await self.add_log("status", f"🚀 Starting process for {self.total_count} groups...")
             for i, link in enumerate(self.links[self.done_count:]):
                 if self.stop_requested: break
@@ -304,6 +317,22 @@ class GroupJoinRotationManager:
 
     async def run(self):
         try:
+            from app.models.user import User
+            user = await User.get(self.user_id)
+            if not user or not user.services_active:
+                await self.broadcast({"event": "log", "data": json.dumps({
+                    "msg": "🛑 Task Aborted: User services are currently STOPPED. Please turn on Terminal.",
+                    "level": "ERROR",
+                    "time": datetime.now().strftime("%I:%M:%S %p"),
+                    "account_id": "SYSTEM"
+                })})
+                for task in self.account_tasks.values():
+                    task.status = "error"
+                    await task.add_log("error", "🛑 Task Aborted: User services are currently STOPPED.", "ERROR")
+                    task.is_done = True
+                    await task.sync_to_db()
+                return
+
             acc_ids = list(self.account_tasks.keys())
             for task in self.account_tasks.values():
                 mode_str = "Mass mode started. All" if self.join_mode == "mass" else "Rotation started. Assigned"
